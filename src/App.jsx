@@ -1,0 +1,1111 @@
+import { useState, useMemo, useCallback, useEffect } from "react";
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ResponsiveContainer, Cell, Legend } from "recharts";
+
+// ── Cores ─────────────────────────────────────────────────────────────────────
+const C = {
+  laranja:"#F97316",laranjaLight:"#FED7AA",verde:"#16A34A",verdeLight:"#BBF7D0",
+  vermelho:"#DC2626",vermelhoLight:"#FEE2E2",amarelo:"#CA8A04",amareloLight:"#FEF08A",
+  azul:"#2563EB",azulLight:"#DBEAFE",roxo:"#7C3AED",roxoLight:"#EDE9FE",
+  cinzaFundo:"#F8F7F4",cinzaCard:"#FFFFFF",cinzaBorda:"#E5E3DF",cinzaTexto:"#6B7280",texto:"#1C1917",
+};
+
+// ── Indicadores ────────────────────────────────────────────────────────────────
+const INDICADORES = [
+  {key:"sla",  spKey:"sla_sp",  label:"SLA Reversa", meta:86, inv:false, unit:"%"},
+  {key:"agend",spKey:"agend_sp",label:"Agendamento",  meta:95, inv:false, unit:"%"},
+  {key:"ader", spKey:"ader_sp", label:"Aderência",    meta:95, inv:false, unit:"%"},
+  {key:"sla15",spKey:"sla15_sp",label:"SLA 15 dias",  meta:90, inv:false, unit:"%"},
+  {key:"aging",spKey:"aging_sp",label:"Aging Médio",  meta:7,  inv:true,  unit:"d"},
+];
+
+const MESES_NOME = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"};
+const TRIM_MESES = {1:[1,2,3],2:[4,5,6],3:[7,8,9],4:[10,11,12]};
+const PARC_CORES = ["#F97316","#2563EB","#16A34A","#7C3AED","#CA8A04","#DC2626","#0891B2","#D97706","#9333EA","#059669"];
+const FAIXAS_AGING = [
+  {label:"≥ 5d",  min:5,  max:9,  cor:C.amarelo,  bg:C.amareloLight},
+  {label:"≥ 10d", min:10, max:14, cor:C.laranja,  bg:"#FFF7ED"},
+  {label:"≥ 15d", min:15, max:19, cor:C.roxo,     bg:C.roxoLight},
+  {label:"≥ 20d", min:20, max:24, cor:C.vermelho, bg:C.vermelhoLight},
+  {label:"≥ 25d", min:25, max:999,cor:"#7F1D1D",  bg:"#FEE2E2"},
+];
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+const norm = s => {
+  if(s==null) return "";
+  return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
+};
+const pct = (n,t) => t>0 ? Math.round(n/t*10000)/100 : null;
+const avg = arr => arr.length ? Math.round(arr.reduce((a,b)=>a+b,0)/arr.length*100)/100 : null;
+const sem = (v, meta, inv) => {
+  if(v==null) return C.cinzaBorda;
+  if(!inv) return v>=meta?C.verde:v>=meta*0.95?C.amarelo:C.vermelho;
+  return v<=meta?C.verde:v<=meta*1.15?C.amarelo:C.vermelho;
+};
+
+// ── CSV Parser ─────────────────────────────────────────────────────────────────
+const parseCSV = (text) => {
+  const lines = text.replace(/\r/g,"").split("\n").filter(l=>l.trim());
+  const sep = lines[0].includes(";") ? ";" : ",";
+  const parseRow = line => {
+    const cells=[]; let cur="", inQ=false;
+    for(let i=0;i<line.length;i++){
+      const ch=line[i];
+      if(ch==='"'){if(inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ;}
+      else if(ch===sep&&!inQ){cells.push(cur);cur="";}
+      else cur+=ch;
+    }
+    cells.push(cur);
+    return cells.map(c=>c.trim().replace(/^"|"$/g,""));
+  };
+  const headers = parseRow(lines[0]);
+  return lines.slice(1).map(line=>{
+    const vals = parseRow(line);
+    const row = {};
+    headers.forEach((h,i)=>{ row[h.trim()] = vals[i]??""});
+    return row;
+  }).filter(r=>Object.values(r).some(v=>v!==""));
+};
+
+// ── calcSemana ─────────────────────────────────────────────────────────────────
+const calcSemana = (rows) => {
+  const base = rows.filter(r=>r["Flag Situacao Coleta"]==="Coletado");
+  if(base.length<3) return null;
+  const sp   = base.filter(r=>r["Problema_de_coleta"]!=="1"&&r["Problema_de_coleta"]!==1&&r["Problema_de_coleta"]!==true);
+  const isNao    = r=>norm(r["Vencido"])==="Nao";
+  const isNao15  = r=>norm(r["Vencido (SLA Cliente)"])==="Nao";
+  const isAg     = r=>r["Agendamento"]==="1"||r["Agendamento"]===1;
+  const isAder   = r=>{const v=r["Aderencia agendamento "]??r["Aderencia agendamento"];return v==="1"||v===1;};
+  const agOk     = base.filter(isAg);
+  const agOkSp   = sp.filter(isAg);
+
+  // Aging: usar coluna "Aging coleta efetivada" se disponível
+  const agingList = base.map(r=>{
+    const v=parseFloat(r["Aging coleta efetivada"]);
+    return !isNaN(v)&&v>=0?v:null;
+  }).filter(v=>v!==null);
+  const agingSpList = sp.map(r=>{
+    const v=parseFloat(r["Aging coleta efetivada"]);
+    return !isNaN(v)&&v>=0?v:null;
+  }).filter(v=>v!==null);
+
+  return {
+    total:    base.length,
+    total_sp: sp.length,
+    sla:      pct(base.filter(isNao).length,   base.length),
+    sla_sp:   pct(sp.filter(isNao).length,     sp.length),
+    agend:    pct(base.filter(isAg).length,    base.length),
+    agend_sp: pct(sp.filter(isAg).length,      sp.length),
+    ader:     pct(agOk.filter(isAder).length,  agOk.length),
+    ader_sp:  pct(agOkSp.filter(isAder).length,agOkSp.length),
+    sla15:    pct(base.filter(isNao15).length, base.length),
+    sla15_sp: pct(sp.filter(isNao15).length,   sp.length),
+    aging:    avg(agingList),
+    aging_sp: avg(agingSpList),
+    prob:     base.filter(r=>r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1).length,
+  };
+};
+
+// ── Chip ───────────────────────────────────────────────────────────────────────
+const Chip = ({v, m, inv, unit}) => {
+  if(v==null) return <span style={{color:C.cinzaTexto}}>—</span>;
+  const cor = sem(v,m,inv);
+  const bg  = cor===C.verde?C.verdeLight:cor===C.amarelo?C.amareloLight:C.vermelhoLight;
+  const fmt = unit==="d" ? `${Math.round(v)}d` : `${v.toFixed(1)}%`;
+  return <span style={{fontWeight:700,color:cor,background:bg,padding:"2px 8px",borderRadius:6,fontSize:12}}>{fmt}</span>;
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Componente AbaAtrasos (precisa de hooks próprios — componente separado)
+// ══════════════════════════════════════════════════════════════════════════════
+const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
+  const [parcSel, setParcSel] = useState([]);
+  const [modo, setModo] = useState("coletados");
+
+  const parcs = useMemo(()=>[...new Set(
+    rawRows.filter(r=>r["Transportadora"]).map(r=>r["Transportadora"]).filter(Boolean)
+  )].sort(),[rawRows]);
+
+  useEffect(()=>{ if(parcs.length>0) setParcSel(parcs); },[parcs.join(",")]);
+
+  const pill=(on,cor=C.laranja)=>({padding:"4px 12px",borderRadius:999,border:`1.5px solid ${on?cor:C.cinzaBorda}`,background:on?`${cor}18`:"transparent",cursor:"pointer",fontSize:12,fontWeight:600,color:on?cor:C.cinzaTexto});
+  const sm=(on,cor)=>({...pill(on,cor),padding:"3px 8px",fontSize:11});
+
+  const baseColetados = useMemo(()=>
+    filtrarPorPeriodo(rawRows.filter(r=>
+      r["Flag Situacao Coleta"]==="Coletado" &&
+      norm(r["Vencido"])==="Sim" &&
+      r["Data Coleta Efetivada Date"] && r["Data Coleta Efetivada Date"]!=="--" && r["Data Coleta Efetivada Date"]!==""
+    )).filter(r=>parcSel.length===0||parcSel.includes(r["Transportadora"]))
+  ,[rawRows, filtrarPorPeriodo, parcSel]);
+
+  const baseAberto = useMemo(()=>
+    rawRows.filter(r=>
+      (!r["Data Coleta Efetivada Date"]||r["Data Coleta Efetivada Date"]==="--"||r["Data Coleta Efetivada Date"]==="") &&
+      r["Data Solicitacao Date"] && r["Data Solicitacao Date"]!=="--" &&
+      (parcSel.length===0||parcSel.includes(r["Transportadora"]))
+    )
+  ,[rawRows, parcSel]);
+
+  const base = modo==="coletados"?baseColetados:modo==="aberto"?baseAberto:[...baseColetados,...baseAberto];
+
+  const comAging = useMemo(()=>base.map(r=>{
+    const d1=r["Data Solicitacao Date"], d2=r["Data Coleta Efetivada Date"];
+    if(!d1||d1==="--") return null;
+    try{
+      const [d1d,d1m,d1y]=d1.split("/"); const dt1=new Date(d1y,d1m-1,d1d);
+      if(d2&&d2!=="--"&&d2!==""){
+        const [d2d,d2m,d2y]=d2.split("/"); const dt2=new Date(d2y,d2m-1,d2d);
+        const dias=Math.round((dt2-dt1)/(86400000));
+        return dias>=0?{...r,diasAtraso:dias,status:"coletado"}:null;
+      } else {
+        const dias=Math.round((new Date()-dt1)/86400000);
+        return dias>=0?{...r,diasAtraso:dias,status:"aberto"}:null;
+      }
+    }catch{return null;}
+  }).filter(Boolean),[base]);
+
+  const porFaixa = FAIXAS_AGING.map(f=>({...f,count:comAging.filter(r=>r.diasAtraso>=f.min&&r.diasAtraso<=f.max).length}));
+  const total = comAging.length;
+  const parcComDados = parcs.filter(p=>comAging.some(r=>r["Transportadora"]===p));
+
+  return <div style={{display:"flex",flexDirection:"column",gap:14}}>
+    {/* Filtros */}
+    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:16}}>
+      <div style={{display:"flex",gap:24,flexWrap:"wrap",alignItems:"flex-start"}}>
+        <div>
+          <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:8}}>Situação</div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {[["coletados","✓ Coletados fora do SLA",C.vermelho],["aberto","⏳ Em aberto",C.amarelo],["todos","Todos",C.cinzaTexto]].map(([v,l,c])=>(
+              <button key={v} onClick={()=>setModo(v)} style={pill(modo===v,c)}>{l}</button>
+            ))}
+          </div>
+        </div>
+        <div style={{flex:1,minWidth:200}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>Parceiros</div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setParcSel(parcs)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",padding:0,fontWeight:600}}>Todos</button>
+              <button onClick={()=>setParcSel([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",padding:0,fontWeight:600}}>Nenhum</button>
+            </div>
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {parcs.map((p,i)=><button key={p} onClick={()=>setParcSel(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p])} style={sm(parcSel.includes(p),PARC_CORES[i%PARC_CORES.length])}>{p.split(" ")[0]}</button>)}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {/* KPIs por faixa */}
+    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:18}}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>
+        {modo==="coletados"?"✓ Coletados fora do SLA":modo==="aberto"?"⏳ Em aberto":"Todos"}
+        <span style={{fontSize:12,color:C.cinzaTexto,fontWeight:400,marginLeft:8}}>{total} pedidos · {sel.map(p=>lbl(p)).join(", ")}</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:10}}>
+        {porFaixa.map((f,i)=>(
+          <div key={i} style={{background:f.bg,borderRadius:10,padding:"12px 14px",borderLeft:`4px solid ${f.cor}`}}>
+            <div style={{fontSize:11,fontWeight:700,color:f.cor,marginBottom:4}}>{f.label}</div>
+            <div style={{fontSize:30,fontWeight:800,color:f.cor,lineHeight:1}}>{f.count}</div>
+            <div style={{fontSize:11,color:C.cinzaTexto,marginTop:4}}>{total>0?Math.round(f.count/total*100):0}% do total</div>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {/* Por parceiro */}
+    {parcComDados.length>0&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>Por Parceiro</div>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+        <thead><tr style={{background:C.cinzaFundo}}>
+          {["Parceiro","Total",...FAIXAS_AGING.map(f=>f.label)].map(h=><th key={h} style={{padding:"8px 12px",textAlign:h==="Parceiro"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
+        </tr></thead>
+        <tbody>{parcComDados.map((p,i)=>{
+          const rows=comAging.filter(r=>r["Transportadora"]===p);
+          return <tr key={p} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+            <td style={{padding:"8px 12px",fontWeight:600}}>{p}</td>
+            <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700,color:C.vermelho}}>{rows.length}</td>
+            {FAIXAS_AGING.map((f,fi)=>{const n=rows.filter(r=>r.diasAtraso>=f.min&&r.diasAtraso<=f.max).length;return <td key={fi} style={{padding:"8px 12px",textAlign:"center"}}>{n>0?<span style={{fontWeight:700,color:f.cor,background:f.bg,padding:"2px 8px",borderRadius:6}}>{n}</span>:<span style={{color:C.cinzaTexto}}>—</span>}</td>;})}
+          </tr>;
+        })}</tbody>
+      </table></div>
+    </div>}
+
+    {/* Detalhe */}
+    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontWeight:700,fontSize:13}}>Detalhe dos Pedidos</span>
+        <span style={{fontSize:12,color:C.cinzaTexto}}>{total} pedidos · maior atraso primeiro</span>
+      </div>
+      <div style={{overflowX:"auto",maxHeight:420,overflowY:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead style={{position:"sticky",top:0,zIndex:1}}>
+            <tr style={{background:C.cinzaFundo}}>
+              {["Pedido","Parceiro","Cidade","UF","Dias","Solicitação","Data Coleta","Status","Prob."].map(h=><th key={h} style={{padding:"7px 12px",textAlign:h==="Dias"?"center":"left",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>{[...comAging].sort((a,b)=>b.diasAtraso-a.diasAtraso).map((r,i)=>{
+            const faixa=FAIXAS_AGING.slice().reverse().find(f=>r.diasAtraso>=f.min)||FAIXAS_AGING[0];
+            const aberto=r.status==="aberto";
+            return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+              <td style={{padding:"6px 12px",fontWeight:600,fontFamily:"monospace",fontSize:11}}>{r["Pv"]||"—"}</td>
+              <td style={{padding:"6px 12px",fontSize:11}}>{(r["Transportadora"]||"").split(" ")[0]}</td>
+              <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Cidade"]||"—"}</td>
+              <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Estado"]||"—"}</td>
+              <td style={{padding:"6px 12px",textAlign:"center"}}><span style={{fontWeight:800,color:faixa.cor,background:faixa.bg,padding:"2px 8px",borderRadius:6}}>{r.diasAtraso}d</span></td>
+              <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Data Solicitacao Date"]||"—"}</td>
+              <td style={{padding:"6px 12px",fontSize:11}}>{aberto?<span style={{color:C.amarelo,fontWeight:700}}>⏳ Em aberto</span>:<span style={{color:C.cinzaTexto}}>{r["Data Coleta Efetivada Date"]}</span>}</td>
+              <td style={{padding:"6px 12px",fontSize:11}}>{aberto?<span style={{background:C.amareloLight,color:C.amarelo,padding:"1px 6px",borderRadius:4,fontWeight:700,fontSize:10}}>Aberto</span>:<span style={{background:C.vermelhoLight,color:C.vermelho,padding:"1px 6px",borderRadius:4,fontWeight:700,fontSize:10}}>Atrasado</span>}</td>
+              <td style={{padding:"6px 12px",textAlign:"center",fontSize:11}}>{r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1?"⚠️":"—"}</td>
+            </tr>;
+          })}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>;
+};
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// App Principal
+// ══════════════════════════════════════════════════════════════════════════════
+export default function App() {
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  const [rawRows,        setRawRows]        = useState([]);
+  const [weeklyExtra,    setWeeklyExtra]    = useState(()=>{ try{const s=localStorage.getItem("slaParca_weekly");return s?JSON.parse(s):[];}catch{return [];} });
+  const [pdExtra,        setPdExtra]        = useState(()=>{ try{const s=localStorage.getItem("slaParca_pd");    return s?JSON.parse(s):{};}catch{return {};} });
+  const [uploadHistory,  setUploadHistory]  = useState(()=>{ try{const s=localStorage.getItem("slaParca_hist"); return s?JSON.parse(s):[];}catch{return [];} });
+  const [variacaoVol,    setVariacaoVol]    = useState(()=>{ try{const s=localStorage.getItem("slaParca_var");  return s?JSON.parse(s):[];}catch{return [];} });
+
+  const [csvStatus,   setCsvStatus]   = useState("idle"); // idle | processando | ok | erro
+  const [csvNome,     setCsvNome]     = useState("");
+  const [csvResumo,   setCsvResumo]   = useState({novas:[],retroativas:[]});
+
+  const [abaGlobal,   setAbaGlobal]   = useState("geral");
+  const [abaSub,      setAbaSub]      = useState("painel");
+  const [granular,    setGranular]    = useState("semana");
+  const [modo,        setModo]        = useState("individual");
+  const [semFiltro,   setSemFiltro]   = useState(false);
+
+  const [semanasSel,     setSemanasSel]     = useState([]);
+  const [mesesSel,       setMesesSel]       = useState([]);
+  const [trimestresSel,  setTrimestresSel]  = useState([]);
+  const [indicSel,       setIndicSel]       = useState(INDICADORES.map(i=>i.key));
+  const [parceiros,      setParceiros]      = useState([]);
+  const [compA,          setCompA]          = useState(null);
+  const [compB,          setCompB]          = useState(null);
+  const [simAumentoVendas, setSimAumentoVendas] = useState(79);
+  const [simSLAEsperado,   setSimSLAEsperado]   = useState(84);
+
+  // ── WEEKLY e PD merged ─────────────────────────────────────────────────────
+  const WEEKLY_MERGED = useMemo(()=>{
+    const extraSet = new Set(weeklyExtra.map(w=>w.s));
+    // sem hardcoded — tudo vem do CSV/localStorage
+    return [...weeklyExtra].sort((a,b)=>a.s-b.s);
+  },[weeklyExtra]);
+
+  const PD_MERGED = useMemo(()=>({...pdExtra}),[pdExtra]);
+
+  const ALL_SEMANAS = useMemo(()=>WEEKLY_MERGED.map(w=>w.s),[WEEKLY_MERGED]);
+
+  const monthlyData = useMemo(()=>{
+    if(!rawRows.length) return [];
+    const map={};
+    rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado").forEach(r=>{
+      const m=parseInt(r["Mês_Efetivada"]); if(!m||m<1||m>12) return;
+      if(!map[m]) map[m]={m,rows:[]};
+      map[m].rows.push(r);
+    });
+    return Object.values(map).map(({m,rows})=>{
+      const d=calcSemana(rows); return d?{m,...d}:null;
+    }).filter(Boolean).sort((a,b)=>a.m-b.m);
+  },[rawRows]);
+
+  const ALL_MESES = useMemo(()=>monthlyData.map(d=>d.m),[monthlyData]);
+
+  // ── PARCEIROS dinâmico ─────────────────────────────────────────────────────
+  const PARCEIROS = useMemo(()=>{
+    const doPD  = Object.keys(PD_MERGED);
+    const doCSV = rawRows.length>0
+      ? [...new Set(rawRows.filter(r=>r["Transportadora"]).map(r=>r["Transportadora"]).filter(Boolean))]
+      : [];
+    return [...new Set([...doPD,...doCSV])].sort();
+  },[PD_MERGED,rawRows]);
+
+  // Auto-selecionar todos ao carregar
+  useEffect(()=>{
+    if(PARCEIROS.length>0 && parceiros.length===0) setParceiros(PARCEIROS);
+  },[PARCEIROS.join(",")]);
+
+  // ── sel / lbl ──────────────────────────────────────────────────────────────
+  const sel = granular==="semana"?semanasSel:granular==="mes"?mesesSel:granular==="trim"?trimestresSel:["2026"];
+  const lbl = p => granular==="semana"?`S${p}`:granular==="mes"?MESES_NOME[p]:granular==="trim"?`T${p}`:p;
+
+  // ── filtrarPorPeriodo ──────────────────────────────────────────────────────
+  const filtrarPorPeriodo = useCallback((rows)=>{
+    if(granular==="semana") return rows.filter(r=>semanasSel.includes(parseInt(r["semana_Efetivada"])));
+    if(granular==="mes")    return rows.filter(r=>mesesSel.includes(parseInt(r["Mês_Efetivada"])));
+    if(granular==="trim")   return rows.filter(r=>{
+      const m=parseInt(r["Mês_Efetivada"]);
+      return trimestresSel.some(t=>TRIM_MESES[t]?.includes(m));
+    });
+    return rows.filter(r=>String(r["Ano_Efetivada"]).trim()==="2026");
+  },[granular,semanasSel,mesesSel,trimestresSel]);
+
+  // ── getRaw ─────────────────────────────────────────────────────────────────
+  const getRaw = useCallback((p,periodo)=>{
+    if(granular==="semana") return PD_MERGED[p]?.[periodo];
+    if(granular==="mes"){
+      const d=monthlyData.find(m=>m.m===periodo);
+      if(!d) return null;
+      // Filtrar por parceiro
+      if(!rawRows.length) return null;
+      const rows=rawRows.filter(r=>r["Transportadora"]===p&&parseInt(r["Mês_Efetivada"])===periodo&&r["Flag Situacao Coleta"]==="Coletado");
+      return rows.length>=3?calcSemana(rows):null;
+    }
+    if(granular==="trim"){
+      const meses=TRIM_MESES[periodo]||[];
+      const results=meses.map(m=>getRaw(p,m)).filter(Boolean);
+      if(!results.length) return null;
+      const total=results.reduce((a,r)=>a+r.total,0);
+      const getW=key=>{let s=0,t=0;results.forEach(r=>{if(r[key]!=null){s+=r[key]*r.total;t+=r.total;}});return t?Math.round(s/t*100)/100:null;};
+      const obj={total};INDICADORES.forEach(i=>{obj[i.key]=getW(i.key);obj[i.spKey]=getW(i.spKey);});
+      obj.prob=results.reduce((a,r)=>a+(r.prob||0),0);
+      return obj;
+    }
+    return null;
+  },[granular,PD_MERGED,monthlyData,rawRows]);
+
+  // ── snapGeral ──────────────────────────────────────────────────────────────
+  const snapGeral = useMemo(()=>{
+    const rows = sel.map(p=>WEEKLY_MERGED.find(w=>w.s===p)).filter(Boolean);
+    if(!rows.length) return {};
+    const total=rows.reduce((a,r)=>a+r.total,0);
+    const getW=key=>{let s=0,t=0;rows.forEach(r=>{if(r[key]!=null){s+=r[key]*r.total;t+=r.total;}});return t?Math.round(s/t*100)/100:null;};
+    const obj={total};
+    INDICADORES.forEach(i=>{obj[i.key]=getW(semFiltro?i.spKey:i.key);});
+    return obj;
+  },[sel,WEEKLY_MERGED,semFiltro]);
+
+  // ── snapParceiros ──────────────────────────────────────────────────────────
+  const snapParceiros = useMemo(()=>parceiros.map(p=>{
+    const rows=sel.map(per=>getRaw(p,per)).filter(Boolean);
+    if(!rows.length) return {nome:p,total:0,...Object.fromEntries(INDICADORES.map(i=>[i.key,null])),prob:0};
+    const total=rows.reduce((a,r)=>a+r.total,0);
+    const getW=key=>{let s=0,t=0;rows.forEach(r=>{if(r[key]!=null){s+=r[key]*r.total;t+=r.total;}});return t?Math.round(s/t*100)/100:null;};
+    const obj={nome:p,total,prob:rows.reduce((a,r)=>a+(r.prob||0),0)};
+    INDICADORES.forEach(i=>{obj[i.key]=getW(semFiltro?i.spKey:i.key);});
+    return obj;
+  }),[parceiros,sel,getRaw,semFiltro]);
+
+  // ── variacaoParceiros ─────────────────────────────────────────────────────
+  const variacaoParceiros = useMemo(()=>{
+    let periodos=[];
+    if(granular==="semana") periodos=ALL_SEMANAS.slice(-2);
+    else if(granular==="mes") periodos=ALL_MESES.slice(-2);
+    if(periodos.length<2) return [];
+    const [pAnt,pAtual]=periodos;
+    return parceiros.map(p=>{
+      const dAnt=getRaw(p,pAnt), dAtual=getRaw(p,pAtual);
+      if(!dAnt||!dAtual) return null;
+      const inds=INDICADORES.map(ind=>{
+        const vAnt=dAnt[semFiltro?ind.spKey:ind.key], vAtual=dAtual[semFiltro?ind.spKey:ind.key];
+        if(vAnt==null||vAtual==null) return null;
+        const delta=Math.round((vAtual-vAnt)*100)/100;
+        return {...ind,vAnt,vAtual,delta,piourou:ind.inv?delta>0.5:delta<-0.5,abaixoMeta:ind.inv?vAtual>ind.meta:vAtual<ind.meta};
+      }).filter(Boolean);
+      return {parceiro:p,pAnt,pAtual,labelAnt:lbl(pAnt),labelAtual:lbl(pAtual),inds,temPiora:inds.some(i=>i.piourou)};
+    }).filter(Boolean);
+  },[parceiros,granular,ALL_SEMANAS,ALL_MESES,getRaw,semFiltro,lbl]);
+
+  // ── CSV Processing ─────────────────────────────────────────────────────────
+  const handleCSV = (file) => {
+    setCsvStatus("processando"); setCsvNome(file.name);
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const rows=parseCSV(ev.target.result);
+        setRawRows(rows);
+
+        // Semanas válidas do CSV
+        const coletado=rows.filter(r=>r["Flag Situacao Coleta"]==="Coletado");
+        const semanasRaw=[...new Set(coletado.map(r=>parseInt(r["semana_Efetivada"])).filter(n=>!isNaN(n)&&n>=1&&n<=53))].sort((a,b)=>a-b);
+        const semanasProc=semanasRaw.slice(0,-1); // ignorar última (em aberto)
+
+        if(!semanasProc.length){ setCsvStatus("ok"); return; }
+
+        // Parceiros do CSV (local, não do state)
+        const parcsCSV=[...new Set(coletado.map(r=>r["Transportadora"]).filter(Boolean))].sort();
+
+        // Calcular todas as semanas
+        const novasW=[], retroativasW=[];
+        setWeeklyExtra(prev=>{
+          const newW=[], retW=[];
+          semanasProc.forEach(s=>{
+            const rowsS=coletado.filter(r=>parseInt(r["semana_Efetivada"])===s);
+            const d=calcSemana(rowsS); if(!d) return;
+            const obj={s,...d};
+            if(prev.some(w=>w.s===s)) retW.push(obj); else newW.push(obj);
+          });
+          novasW.push(...newW); retroativasW.push(...retW);
+          const todas=[...newW,...retW];
+          const merged=[...prev.filter(w=>!todas.find(n=>n.s===w.s)),...todas].sort((a,b)=>a.s-b.s);
+          try{localStorage.setItem("slaParca_weekly",JSON.stringify(merged));}catch{}
+          return merged;
+        });
+
+        // Por parceiro
+        setPdExtra(prev=>{
+          const merged={...prev};
+          parcsCSV.forEach(p=>{
+            const rowsP=coletado.filter(r=>r["Transportadora"]===p);
+            semanasProc.forEach(s=>{
+              const rowsPS=rowsP.filter(r=>parseInt(r["semana_Efetivada"])===s);
+              if(rowsPS.length<3) return;
+              const d=calcSemana(rowsPS); if(!d) return;
+              if(!merged[p]) merged[p]={};
+              merged[p][s]=d;
+            });
+          });
+          try{localStorage.setItem("slaParca_pd",JSON.stringify(merged));}catch{}
+          return merged;
+        });
+
+        // Upload history
+        setUploadHistory(prev=>{
+          const entry={nome:file.name,data:new Date().toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}),total:rows.length};
+          const updated=[...prev,entry];
+          try{localStorage.setItem("slaParca_hist",JSON.stringify(updated));}catch{}
+          return updated;
+        });
+
+        // Auto-selecionar última semana
+        const ultimaSem=semanasProc[semanasProc.length-1];
+        setSemanasSel([ultimaSem]);
+        setParceiros(parcsCSV);
+
+        setCsvStatus("ok");
+        setCsvResumo({novas:novasW.map(w=>w.s),retroativas:retroativasW.map(w=>w.s)});
+      }catch(e){console.error(e);setCsvStatus("erro");}
+    };
+    reader.readAsText(file);
+  };
+
+  // ── Exportar CSV ───────────────────────────────────────────────────────────
+  const escCSV=v=>{const s=String(v??"");return s.includes(";")||s.includes('"')?`"${s.replace(/"/g,'""')}"`:s;};
+  const downloadCSV=(rows,nome)=>{
+    const csv=rows.map(r=>r.map(escCSV).join(";")).join("\n");
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));
+    a.download=`${nome}_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+  };
+
+  const exportarPainel=()=>{
+    if(!snapParceiros.length){alert("Sem dados.");return;}
+    const inds=INDICADORES.filter(i=>indicSel.includes(i.key));
+    downloadCSV([
+      ["Parceiro","Período","Coletas",...inds.map(i=>i.label),"Prob."],
+      ...snapParceiros.map(row=>[row.nome,sel.map(p=>lbl(p)).join("+"),row.total,...inds.map(i=>{const v=row[i.key];return v!=null?v.toFixed(2)+i.unit:"—";}),row.prob])
+    ],"painel_desempenho");
+  };
+
+  const exportarCSV=()=>{
+    if(abaGlobal==="geral"){
+      downloadCSV([["Período","Coletas",...INDICADORES.filter(i=>indicSel.includes(i.key)).map(i=>i.label)],
+        ...WEEKLY_MERGED.map(w=>[`S${w.s}`,w.total,...INDICADORES.filter(i=>indicSel.includes(i.key)).map(i=>w[i.key]!=null?w[i.key].toFixed(2)+i.unit:"—")])
+      ],"visao_geral");
+    } else if(abaGlobal==="parceiros") {
+      exportarPainel();
+    }
+  };
+
+  // ── Botões helpers ─────────────────────────────────────────────────────────
+  const pill=(on,cor=C.laranja)=>({padding:"5px 14px",borderRadius:999,border:`1.5px solid ${on?cor:C.cinzaBorda}`,background:on?`${cor}18`:"transparent",cursor:"pointer",fontSize:13,fontWeight:600,color:on?cor:C.cinzaTexto});
+  const sm=(on,cor=C.laranja)=>({...pill(on,cor),padding:"3px 10px",fontSize:11});
+  const hdr=(label,active)=>({padding:"8px 16px",borderRadius:8,border:"none",background:active?C.laranja:"transparent",color:active?"white":C.cinzaTexto,cursor:"pointer",fontWeight:active?700:500,fontSize:13,display:"flex",alignItems:"center",gap:6});
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  return <div style={{minHeight:"100vh",background:C.cinzaFundo,fontFamily:"'Inter',system-ui,sans-serif"}}>
+
+    {/* ── HEADER ── */}
+    <div style={{background:"white",borderBottom:`1px solid ${C.cinzaBorda}`,padding:"10px 24px",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",position:"sticky",top:0,zIndex:10}}>
+      <div style={{fontWeight:800,fontSize:16,color:C.laranja,marginRight:8}}>🏠 Parça</div>
+      {ALL_SEMANAS.length>0&&<span style={{fontSize:11,color:C.cinzaTexto}}>S{ALL_SEMANAS[ALL_SEMANAS.length-1]}</span>}
+
+      {/* Status CSV */}
+      {csvStatus==="processando"&&<span style={{fontSize:11,color:C.cinzaTexto}}>⏳ processando...</span>}
+      {csvStatus==="ok"&&<span style={{fontSize:11,background:C.verdeLight,color:C.verde,padding:"2px 10px",borderRadius:999,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+        ✓ {csvNome}
+        {csvResumo.novas.length>0&&<span>· +{csvResumo.novas.length} nova{csvResumo.novas.length>1?"s":""} (S{csvResumo.novas.join(", S")})</span>}
+        {csvResumo.retroativas.length>0&&<span style={{color:C.azul}}>· {csvResumo.retroativas.length} retroativa{csvResumo.retroativas.length>1?"s":""} (S{csvResumo.retroativas.join(", S")})</span>}
+      </span>}
+      {csvStatus==="erro"&&<span style={{fontSize:11,background:C.vermelhoLight,color:C.vermelho,padding:"2px 10px",borderRadius:999}}>❌ Erro ao processar CSV</span>}
+
+      <div style={{flex:1}}/>
+
+      {/* Botões */}
+      <label style={{...pill(false),cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
+        <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleCSV(e.target.files[0]);e.target.value="";}}/>
+        📂 Carregar CSV
+      </label>
+      {(abaGlobal==="geral"||abaGlobal==="parceiros")&&<button onClick={exportarCSV} style={{...pill(false),display:"flex",alignItems:"center",gap:5,color:C.azul}}>📥 Exportar CSV</button>}
+    </div>
+
+    {/* ── ABAS PRINCIPAIS ── */}
+    <div style={{background:"white",borderBottom:`1px solid ${C.cinzaBorda}`,padding:"0 24px",display:"flex",gap:4,overflowX:"auto"}}>
+      {[["geral","🏠 Visão Geral"],["parceiros","🔍 Por Parceiro"],["atrasos","⏰ Atrasos"],["simulacao","📈 Simulação"],["config","⚙️ Configurações"]].map(([k,l])=>(
+        <button key={k} onClick={()=>setAbaGlobal(k)} style={{...hdr(l,abaGlobal===k),borderRadius:0,borderBottom:abaGlobal===k?`2px solid ${C.laranja}`:"2px solid transparent",padding:"12px 16px"}}>{l}</button>
+      ))}
+    </div>
+
+    <div style={{maxWidth:1280,margin:"0 auto",padding:"20px 24px",display:"flex",flexDirection:"column",gap:16}}>
+
+      {/* ── FILTROS ── */}
+      {abaGlobal!=="simulacao"&&abaGlobal!=="config"&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:16,display:"flex",gap:24,flexWrap:"wrap",alignItems:"flex-start"}}>
+
+        {/* Período */}
+        <div style={{minWidth:280}}>
+          <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3,marginBottom:8}}>Período</div>
+          <div style={{display:"flex",gap:6,marginBottom:10}}>
+            {[["semana","Semana"],["mes","Mês"],["trim","Trimestre"],["ano","Ano"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setGranular(k)} style={pill(granular===k)}>{l}</button>
+            ))}
+          </div>
+          {granular==="semana"&&<>
+            <div style={{display:"flex",gap:6,marginBottom:6}}>
+              <button onClick={()=>setSemanasSel(ALL_SEMANAS)} style={sm(false)}>Todos</button>
+              <button onClick={()=>setSemanasSel([])} style={sm(false)}>Nenhum</button>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4,maxHeight:120,overflowY:"auto"}}>
+              {ALL_SEMANAS.map(s=><button key={s} onClick={()=>setSemanasSel(prev=>prev.includes(s)?prev.filter(x=>x!==s):[...prev,s])} style={sm(semanasSel.includes(s))}>{`S${s}`}</button>)}
+            </div>
+          </>}
+          {granular==="mes"&&<>
+            <div style={{display:"flex",gap:6,marginBottom:6}}>
+              <button onClick={()=>setMesesSel(ALL_MESES)} style={sm(false)}>Todos</button>
+              <button onClick={()=>setMesesSel([])} style={sm(false)}>Nenhum</button>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {ALL_MESES.map(m=><button key={m} onClick={()=>setMesesSel(prev=>prev.includes(m)?prev.filter(x=>x!==m):[...prev,m])} style={sm(mesesSel.includes(m))}>{MESES_NOME[m]}</button>)}
+            </div>
+          </>}
+          {granular==="trim"&&<div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+            {[1,2,3,4].map(t=><button key={t} onClick={()=>setTrimestresSel(prev=>prev.includes(t)?prev.filter(x=>x!==t):[...prev,t])} style={sm(trimestresSel.includes(t))}>T{t}</button>)}
+          </div>}
+        </div>
+
+        {/* Visualização */}
+        <div>
+          <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3,marginBottom:8}}>Visualização</div>
+          <div style={{display:"flex",gap:6,marginBottom:8}}>
+            <button onClick={()=>setModo("individual")} style={pill(modo==="individual")}>Individual</button>
+            <button onClick={()=>setModo("comparar")} style={pill(modo==="comparar")}>Comparar</button>
+          </div>
+          <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:13,color:C.cinzaTexto}}>
+            <input type="checkbox" checked={semFiltro} onChange={e=>setSemFiltro(e.target.checked)} style={{accentColor:C.laranja}}/>
+            Excluir problemas de coleta {semFiltro&&<span style={{color:C.laranja,fontWeight:700}}>⚡</span>}
+          </label>
+          {modo==="comparar"&&<div style={{marginTop:8,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <select value={compA??""} onChange={e=>setCompA(e.target.value?Number(e.target.value)||e.target.value:null)} style={{border:`1px solid ${C.cinzaBorda}`,borderRadius:6,padding:"4px 8px",fontSize:12}}>
+              <option value="">Período A</option>
+              {(granular==="semana"?ALL_SEMANAS:granular==="mes"?ALL_MESES:[1,2,3,4]).map(p=><option key={p} value={p}>{lbl(p)}</option>)}
+            </select>
+            <span style={{color:C.cinzaTexto}}>vs</span>
+            <select value={compB??""} onChange={e=>setCompB(e.target.value?Number(e.target.value)||e.target.value:null)} style={{border:`1px solid ${C.cinzaBorda}`,borderRadius:6,padding:"4px 8px",fontSize:12}}>
+              <option value="">Período B</option>
+              {(granular==="semana"?ALL_SEMANAS:granular==="mes"?ALL_MESES:[1,2,3,4]).map(p=><option key={p} value={p}>{lbl(p)}</option>)}
+            </select>
+          </div>}
+        </div>
+
+        {/* Indicadores */}
+        <div>
+          <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3,marginBottom:8}}>Indicadores</div>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+            {INDICADORES.map(ind=><button key={ind.key} onClick={()=>setIndicSel(prev=>prev.includes(ind.key)?prev.filter(x=>x!==ind.key):[...prev,ind.key])} style={sm(indicSel.includes(ind.key))}>{ind.label}</button>)}
+          </div>
+        </div>
+
+        {/* Parceiros */}
+        {abaGlobal==="parceiros"&&<div style={{flex:1,minWidth:200}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3}}>Parceiros</div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setParceiros(PARCEIROS)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todos</button>
+              <button onClick={()=>setParceiros([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhum</button>
+            </div>
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+            {PARCEIROS.map((p,i)=><button key={p} onClick={()=>setParceiros(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p])} style={sm(parceiros.includes(p),PARC_CORES[i%PARC_CORES.length])}>{p.split(" ")[0]}</button>)}
+          </div>
+        </div>}
+      </div>}
+
+
+      {/* ══ VISÃO GERAL ══ */}
+      {abaGlobal==="geral"&&<div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+        {/* KPIs */}
+        {sel.length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+          {INDICADORES.filter(i=>indicSel.includes(i.key)).map(ind=>{
+            const v=snapGeral[ind.key];
+            const cor=sem(v,ind.meta,ind.inv);
+            const bg=cor===C.verde?C.verdeLight:cor===C.amarelo?C.amareloLight:C.vermelhoLight;
+            return <div key={ind.key} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"16px 18px",borderLeft:`4px solid ${cor}`}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:8}}>{ind.label}</div>
+              <div style={{fontSize:32,fontWeight:800,color:cor,lineHeight:1}}>{v!=null?(ind.inv?`${Math.round(v)}d`:`${v.toFixed(1)}%`):"—"}</div>
+              <div style={{fontSize:11,color:C.cinzaTexto,marginTop:4}}>meta {ind.inv?`≤${ind.meta}d`:`${ind.meta}%`} · {snapGeral.total??0} coletas</div>
+            </div>;
+          })}
+        </div>}
+
+        {/* Painel variação */}
+        {variacaoParceiros.length>0&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontWeight:700,fontSize:14}}>📊 Variação — {variacaoParceiros[0]?.labelAnt} → {variacaoParceiros[0]?.labelAtual}</div>
+            <div style={{display:"flex",gap:10,fontSize:12}}>
+              {variacaoParceiros.filter(v=>v.temPiora).length>0&&<span style={{color:C.vermelho,fontWeight:700}}>🔴 {variacaoParceiros.filter(v=>v.temPiora).length} pioram</span>}
+              {variacaoParceiros.filter(v=>!v.temPiora).length>0&&<span style={{color:C.verde,fontWeight:600}}>✓ {variacaoParceiros.filter(v=>!v.temPiora).length} estáveis</span>}
+            </div>
+          </div>
+          {variacaoParceiros.filter(v=>v.temPiora).map((v,vi)=>(
+            <div key={vi} style={{borderTop:`1px solid ${C.cinzaBorda}`,padding:"12px 18px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+                <span style={{fontWeight:700,fontSize:13}}>{v.parceiro}</span>
+                <span style={{fontSize:11,background:C.vermelhoLight,color:C.vermelho,padding:"2px 8px",borderRadius:999,fontWeight:700}}>🔴 {v.inds.filter(i=>i.piourou).length} piora{v.inds.filter(i=>i.piourou).length>1?"m":""}</span>
+                {(()=>{const d=getRaw(v.parceiro,v.pAtual);return d?<span style={{fontSize:11,color:C.cinzaTexto}}>{d.total} coletas</span>:null;})()}
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {v.inds.map((ind,ii)=>{
+                  const cor=ind.piourou?(ind.abaixoMeta?C.vermelho:C.amarelo):C.verde;
+                  const bg=ind.piourou?(ind.abaixoMeta?C.vermelhoLight:C.amareloLight):C.verdeLight;
+                  return <div key={ii} style={{background:bg,borderRadius:8,padding:"6px 12px",minWidth:110,border:`1px solid ${cor}22`}}>
+                    <div style={{fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:2}}>{ind.label}</div>
+                    <div style={{fontSize:16,fontWeight:800,color:cor}}>{ind.inv?`${Math.round(ind.vAtual)}d`:`${ind.vAtual.toFixed(1)}%`} {ind.piourou?"↘":"↗"}</div>
+                    <div style={{fontSize:11,color:cor}}>{ind.delta>0?"+":""}{ind.inv?Math.round(ind.delta):ind.delta.toFixed(1)}{ind.unit} vs {v.labelAnt}</div>
+                  </div>;
+                })}
+              </div>
+            </div>
+          ))}
+          {variacaoParceiros.filter(v=>!v.temPiora).length>0&&<div style={{padding:"10px 18px",background:C.verdeLight,borderTop:`1px solid ${C.cinzaBorda}`,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:12,color:C.verde,fontWeight:700}}>✓ Mantiveram ou melhoraram:</span>
+            {variacaoParceiros.filter(v=>!v.temPiora).map((v,i)=><span key={i} style={{fontSize:12,background:"white",borderRadius:6,padding:"2px 10px",border:`1px solid ${C.verde}44`,color:C.verde,fontWeight:600}}>{v.parceiro.split(" ")[0]}</span>)}
+          </div>}
+        </div>}
+
+        {/* Top cidades */}
+        {rawRows.length>0&&(()=>{
+          const base=filtrarPorPeriodo(rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"));
+          const cidMap={};
+          base.forEach(r=>{
+            const key=`${r["Cidade"]||"N/A"} (${r["Estado"]||""})`;
+            if(!cidMap[key]) cidMap[key]={total:0,atraso:0,parceiros:{}};
+            cidMap[key].total++;
+            if(norm(r["Vencido"])==="Sim"){cidMap[key].atraso++;const p=r["Transportadora"]||"—";cidMap[key].parceiros[p]=(cidMap[key].parceiros[p]||0)+1;}
+          });
+          const cidades=Object.entries(cidMap).filter(([,v])=>v.atraso>0&&v.total>=3).map(([loc,v])=>({loc,total:v.total,atraso:v.atraso,pct:Math.round(v.atraso/v.total*10000)/100,top:Object.entries(v.parceiros).sort((a,b)=>b[1]-a[1])[0]})).sort((a,b)=>b.atraso-a.atraso).slice(0,10);
+          if(!cidades.length) return null;
+          return <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+            <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>🗺️ Top Cidades — Maior número de atrasos</div>
+            <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:C.cinzaFundo}}>{["#","Cidade","Atrasos","Total","% Atraso","Principal parceiro"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Cidade","Principal parceiro"].includes(h)?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+              <tbody>{cidades.map((c,i)=>{const cor=c.pct>30?C.vermelho:c.pct>15?C.amarelo:C.cinzaTexto;return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:c.pct>30?C.vermelhoLight:c.pct>15?C.amareloLight:"transparent"}}>
+                <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700,color:cor}}>{i+1}</td>
+                <td style={{padding:"7px 12px",fontWeight:600}}>{c.loc}</td>
+                <td style={{padding:"7px 12px",textAlign:"center",fontWeight:800,color:C.vermelho,fontSize:15}}>{c.atraso}</td>
+                <td style={{padding:"7px 12px",textAlign:"center",color:C.cinzaTexto}}>{c.total}</td>
+                <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700,color:cor}}>{c.pct.toFixed(1)}%</td>
+                <td style={{padding:"7px 12px",fontSize:12,color:C.cinzaTexto}}>{c.top&&<span>{c.top[0].split(" ")[0]} <span style={{color:C.vermelho,fontWeight:700}}>({c.top[1]})</span></span>}</td>
+              </tr>;})}
+              </tbody>
+            </table></div>
+          </div>;
+        })()}
+
+        {/* Tabela histórica */}
+        <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>Histórico — {sel.map(p=>lbl(p)).join(", ")||"Nenhum período selecionado"}</div>
+          <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead><tr style={{background:C.cinzaFundo}}>
+              {["Período","Coletas",...INDICADORES.filter(i=>indicSel.includes(i.key)).map(i=>i.label),"Prob.","Tendência"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Período","Tendência"].includes(h)||h==="Prob."?"center":h==="Coletas"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
+            </tr></thead>
+            <tbody>{(()=>{
+              const rows=[...WEEKLY_MERGED.filter(w=>sel.includes(w.s))].reverse();
+              return rows.map((w,i)=>{
+                const prev=rows[i+1];
+                const inds=INDICADORES.filter(ind=>indicSel.includes(ind.key));
+                return <tr key={w.s} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i===0?"#FFFBF5":"transparent"}}>
+                  <td style={{padding:"7px 12px",fontWeight:700,textAlign:"center"}}>S{w.s}{i===0&&<span style={{fontSize:10,color:C.laranja,marginLeft:4}}>↑</span>}</td>
+                  <td style={{padding:"7px 12px",color:C.cinzaTexto}}>{w.total}</td>
+                  {inds.map(ind=><td key={ind.key} style={{padding:"7px 12px",textAlign:"center"}}><Chip v={w[semFiltro?ind.spKey:ind.key]} m={ind.meta} inv={ind.inv} unit={ind.unit}/></td>)}
+                  <td style={{padding:"7px 12px",textAlign:"center",color:w.prob>0?C.vermelho:C.verde,fontWeight:700}}>{w.prob}</td>
+                  <td style={{padding:"7px 12px",textAlign:"center"}}>{prev?<div style={{display:"flex",gap:2,justifyContent:"center"}}>
+                    {inds.map((ind,ii)=>{const v=w[semFiltro?ind.spKey:ind.key],vp=prev[semFiltro?ind.spKey:ind.key];if(v==null||vp==null)return null;const d=v-vp;const m=ind.inv?d<0:d>0;const s=Math.abs(d)<0.5?"→":m?"↗":"↘";const c=Math.abs(d)<0.5?C.cinzaTexto:m?C.verde:C.vermelho;return <span key={ii} title={`${ind.label}: ${d>0?"+":""}${ind.inv?Math.round(d):d.toFixed(1)}${ind.unit}`} style={{color:c,fontSize:13,cursor:"default"}}>{s}</span>;})}
+                  </div>:<span style={{color:C.cinzaTexto}}>—</span>}</td>
+                </tr>;
+              });
+            })()}</tbody>
+          </table></div>
+        </div>
+      </div>}
+
+
+      {/* ══ POR PARCEIRO ══ */}
+      {abaGlobal==="parceiros"&&<div style={{display:"flex",flexDirection:"column",gap:14}}>
+        {/* Sub-abas */}
+        <div style={{display:"flex",gap:4,borderBottom:`1px solid ${C.cinzaBorda}`,background:C.cinzaCard,borderRadius:"12px 12px 0 0",padding:"0 16px",flexWrap:"wrap"}}>
+          {[["painel","📊 Painel"],["evolucao","📈 Evolução"],["aging","⏳ Aging Elevado"],["cidades","🗺️ Cidades"],["problemas","⚠️ Problemas"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setAbaSub(k)} style={{...hdr(l,abaSub===k),borderRadius:0,borderBottom:abaSub===k?`2px solid ${C.laranja}`:"2px solid transparent",padding:"10px 14px",fontSize:12}}>{l}</button>
+          ))}
+        </div>
+
+        {/* Painel de Desempenho */}
+        {abaSub==="painel"&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontWeight:700,fontSize:13}}>Painel de Desempenho — {sel.map(p=>lbl(p)).join(", ")||"—"}{semFiltro&&" ⚡"}</div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={exportarPainel} style={{...pill(false),fontSize:11,color:C.azul}}>📥 CSV</button>
+            </div>
+          </div>
+          {modo==="individual"&&<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead><tr style={{background:C.cinzaFundo}}>
+              {["Parceiro","Coletas",...INDICADORES.filter(i=>indicSel.includes(i.key)).map(i=>i.label),"Prob."].map(h=><th key={h} style={{padding:"8px 12px",textAlign:h==="Parceiro"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
+            </tr></thead>
+            <tbody>{snapParceiros.map((row,i)=><tr key={row.nome} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+              <td style={{padding:"8px 12px",fontWeight:600,color:PARC_CORES[i%PARC_CORES.length]}}>{row.nome}</td>
+              <td style={{padding:"8px 12px",textAlign:"center",color:C.cinzaTexto}}>{row.total}</td>
+              {INDICADORES.filter(ind=>indicSel.includes(ind.key)).map(ind=><td key={ind.key} style={{padding:"8px 12px",textAlign:"center"}}><Chip v={row[ind.key]} m={ind.meta} inv={ind.inv} unit={ind.unit}/></td>)}
+              <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700,color:row.prob>0?C.vermelho:C.verde}}>{row.prob}</td>
+            </tr>)}</tbody>
+          </table></div>}
+          {modo==="comparar"&&compA!=null&&compB!=null&&<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead><tr style={{background:C.cinzaFundo}}>
+              <th style={{padding:"8px 12px",textAlign:"left",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>Parceiro</th>
+              {INDICADORES.filter(i=>indicSel.includes(i.key)).flatMap(ind=>[
+                <th key={`${ind.key}_a`} style={{padding:"8px 12px",textAlign:"center",fontSize:10,fontWeight:700,color:C.azul,textTransform:"uppercase",whiteSpace:"nowrap"}}>{ind.label} {lbl(compA)}</th>,
+                <th key={`${ind.key}_b`} style={{padding:"8px 12px",textAlign:"center",fontSize:10,fontWeight:700,color:C.laranja,textTransform:"uppercase",whiteSpace:"nowrap"}}>{ind.label} {lbl(compB)}</th>,
+                <th key={`${ind.key}_d`} style={{padding:"8px 12px",textAlign:"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>Δ</th>,
+              ])}
+            </tr></thead>
+            <tbody>{parceiros.map((p,i)=>{
+              const dA=getRaw(p,compA),dB=getRaw(p,compB);
+              return <tr key={p} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                <td style={{padding:"8px 12px",fontWeight:600,color:PARC_CORES[i%PARC_CORES.length]}}>{p}</td>
+                {INDICADORES.filter(ind=>indicSel.includes(ind.key)).flatMap(ind=>{
+                  const vA=dA?.[ind.key],vB=dB?.[ind.key];
+                  const d=vA!=null&&vB!=null?Math.round((vB-vA)*100)/100:null;
+                  const cor=d!=null?(ind.inv?d<=0:d>=0)?C.verde:C.vermelho:C.cinzaTexto;
+                  return [
+                    <td key={`a`} style={{padding:"8px 12px",textAlign:"center"}}><Chip v={vA} m={ind.meta} inv={ind.inv} unit={ind.unit}/></td>,
+                    <td key={`b`} style={{padding:"8px 12px",textAlign:"center"}}><Chip v={vB} m={ind.meta} inv={ind.inv} unit={ind.unit}/></td>,
+                    <td key={`d`} style={{padding:"8px 12px",textAlign:"center",fontWeight:700,color:cor,fontSize:12}}>{d!=null?`${d>0?"+":""}${ind.inv?Math.round(d):d.toFixed(1)}${ind.unit}`:"—"}</td>,
+                  ];
+                })}
+              </tr>;
+            })}</tbody>
+          </table></div>}
+        </div>}
+
+        {/* Evolução */}
+        {abaSub==="evolucao"&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {parceiros.map((p,pi)=>{
+            const cor=PARC_CORES[pi%PARC_CORES.length];
+            const dataEvol=(granular==="semana"?ALL_SEMANAS:ALL_MESES).map(per=>{
+              const d=getRaw(p,per); if(!d) return null;
+              const obj={periodo:lbl(per),total:d.total};
+              INDICADORES.forEach(ind=>{obj[ind.key]=d[semFiltro?ind.spKey:ind.key];});
+              return obj;
+            }).filter(Boolean);
+            if(!dataEvol.length) return null;
+            return <div key={p} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:16}}>
+              <div style={{fontWeight:700,color:cor,marginBottom:12}}>{p}</div>
+              <ResponsiveContainer width="100%" height={160}>
+                <LineChart data={dataEvol} margin={{top:4,right:16,bottom:0,left:-20}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={C.cinzaBorda}/>
+                  <XAxis dataKey="periodo" tick={{fontSize:10}} stroke={C.cinzaBorda}/>
+                  <YAxis domain={[60,100]} tick={{fontSize:10}} stroke={C.cinzaBorda}/>
+                  <Tooltip formatter={(v,n)=>[v!=null?`${v.toFixed(1)}%`:"—",n]}/>
+                  {INDICADORES.filter(i=>indicSel.includes(i.key)&&i.key!=="aging").map((ind,ii)=>(
+                    <Line key={ind.key} type="monotone" dataKey={ind.key} stroke={PARC_CORES[ii%PARC_CORES.length]} dot={false} strokeWidth={2} name={ind.label}/>
+                  ))}
+                  <ReferenceLine y={86} stroke={C.vermelho} strokeDasharray="3 3" strokeWidth={1}/>
+                </LineChart>
+              </ResponsiveContainer>
+            </div>;
+          })}
+        </div>}
+
+        {/* Aging Elevado */}
+        {abaSub==="aging"&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {parceiros.map((p,pi)=>{
+            const todas=(granular==="semana"?ALL_SEMANAS:ALL_MESES).map(per=>({per,d:getRaw(p,per)})).filter(x=>x.d&&(x.d.aging||0)>=10);
+            if(!todas.length) return null;
+            return <div key={p} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+              <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13,color:PARC_CORES[pi%PARC_CORES.length]}}>{p} — Períodos com Aging ≥ 10d</div>
+              <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead><tr style={{background:C.cinzaFundo}}>{["Período","Coletas","SLA","Aging","Prob.","Agend.","Aderência"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+                <tbody>{todas.map(({per,d},i)=><tr key={per} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                  <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700}}>{lbl(per)}</td>
+                  <td style={{padding:"7px 12px",textAlign:"center",color:C.cinzaTexto}}>{d.total}</td>
+                  <td style={{padding:"7px 12px",textAlign:"center"}}><Chip v={d.sla} m={86} inv={false} unit="%"/></td>
+                  <td style={{padding:"7px 12px",textAlign:"center"}}><Chip v={d.aging} m={7} inv={true} unit="d"/></td>
+                  <td style={{padding:"7px 12px",textAlign:"center",color:d.prob>0?C.vermelho:C.verde,fontWeight:700}}>{d.prob}</td>
+                  <td style={{padding:"7px 12px",textAlign:"center"}}><Chip v={d.agend} m={95} inv={false} unit="%"/></td>
+                  <td style={{padding:"7px 12px",textAlign:"center"}}><Chip v={d.ader} m={95} inv={false} unit="%"/></td>
+                </tr>)}</tbody>
+              </table></div>
+            </div>;
+          })}
+        </div>}
+
+        {/* Cidades/Estado */}
+        {abaSub==="cidades"&&(rawRows.length===0
+          ?<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:24,textAlign:"center",color:C.cinzaTexto}}>📂 Carregue um CSV para ver a análise por cidade.</div>
+          :(()=>{
+            const base=filtrarPorPeriodo(rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"));
+            return PARCEIROS.filter(p=>parceiros.includes(p)).map((p,pi)=>{
+              const tc=semFiltro?base.filter(r=>r["Transportadora"]===p&&r["Problema_de_coleta"]!=="1"&&r["Problema_de_coleta"]!==1):base.filter(r=>r["Transportadora"]===p);
+              if(!tc.length) return null;
+              const cidMap={};
+              tc.forEach(r=>{const k=`${r["Cidade"]||"N/A"} (${r["Estado"]||""})`;if(!cidMap[k])cidMap[k]={t:0,a:0};cidMap[k].t++;if(norm(r["Vencido"])==="Sim")cidMap[k].a++;});
+              const cids=Object.entries(cidMap).filter(([,v])=>v.t>=3).sort((a,b)=>b[1].a/b[1].t-a[1].a/a[1].t).slice(0,15);
+              if(!cids.length) return null;
+              return <div key={p} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+                <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13,color:PARC_CORES[pi%PARC_CORES.length]}}>{p}</div>
+                <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead><tr style={{background:C.cinzaFundo}}>{["Cidade/Estado","Total","Atrasos","% Atraso"].map(h=><th key={h} style={{padding:"7px 12px",textAlign:h==="Cidade/Estado"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
+                  <tbody>{cids.map(([loc,v],i)=>{const pct2=Math.round(v.a/v.t*100);const cor=pct2>30?C.vermelho:pct2>15?C.amarelo:C.verde;return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                    <td style={{padding:"7px 12px",fontWeight:500}}>{loc}</td>
+                    <td style={{padding:"7px 12px",textAlign:"center",color:C.cinzaTexto}}>{v.t}</td>
+                    <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700,color:C.vermelho}}>{v.a}</td>
+                    <td style={{padding:"7px 12px",textAlign:"center"}}><span style={{fontWeight:700,color:cor,background:cor===C.verde?C.verdeLight:cor===C.amarelo?C.amareloLight:C.vermelhoLight,padding:"2px 8px",borderRadius:6}}>{pct2}%</span></td>
+                  </tr>;})}
+                  </tbody>
+                </table></div>
+              </div>;
+            }).filter(Boolean);
+          })()
+        )}
+
+        {/* Problemas */}
+        {abaSub==="problemas"&&(rawRows.length===0
+          ?<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:24,textAlign:"center",color:C.cinzaTexto}}>📂 Carregue um CSV para ver a análise de problemas.</div>
+          :(()=>{
+            const ACOES={"Cliente ausente":"Acionar cliente 24h antes","Telefone Inválido":"Atualizar contato","NF errada":"Verificar documentação","Cliente desistiu":"Contato preventivo","Endereço não localizado":"Validar endereço antes do agendamento"};
+            const base=filtrarPorPeriodo(rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&(r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1)));
+            return PARCEIROS.filter(p=>parceiros.includes(p)).map((p,pi)=>{
+              const tc=base.filter(r=>r["Transportadora"]===p);
+              if(!tc.length) return null;
+              const motMap={};
+              tc.forEach(r=>{const m=r["Problema Motivo"]||"Sem motivo";if(!motMap[m])motMap[m]={c:0,a:0,cids:{}};motMap[m].c++;if(norm(r["Vencido"])==="Sim")motMap[m].a++;const c=`${r["Cidade"]||"N/A"}`;motMap[m].cids[c]=(motMap[m].cids[c]||0)+1;});
+              const mots=Object.entries(motMap).sort((a,b)=>b[1].c-a[1].c);
+              return <div key={p} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+                <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13,color:PARC_CORES[pi%PARC_CORES.length]}}>{p} — {tc.length} problemas</div>
+                <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead><tr style={{background:C.cinzaFundo}}>{["Motivo","Ocorr.","c/ Atraso","Cidade principal","Ação sugerida"].map(h=><th key={h} style={{padding:"7px 12px",textAlign:h==="Motivo"||h==="Ação sugerida"||h==="Cidade principal"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
+                  <tbody>{mots.map(([mot,v],i)=><tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                    <td style={{padding:"7px 12px",fontWeight:500}}>{mot}</td>
+                    <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700}}>{v.c}</td>
+                    <td style={{padding:"7px 12px",textAlign:"center",color:v.a>0?C.vermelho:C.cinzaTexto,fontWeight:v.a>0?700:400}}>{v.a}</td>
+                    <td style={{padding:"7px 12px",color:C.cinzaTexto,fontSize:11}}>{Object.entries(v.cids).sort((a,b)=>b[1]-a[1])[0]?.[0]||"—"}</td>
+                    <td style={{padding:"7px 12px",fontSize:11,color:C.azul}}>{ACOES[mot]||"Investigar causa"}</td>
+                  </tr>)}
+                  </tbody>
+                </table></div>
+              </div>;
+            }).filter(Boolean);
+          })()
+        )}
+      </div>}
+
+      {/* ══ ATRASOS ══ */}
+      {abaGlobal==="atrasos"&&(rawRows.length===0
+        ?<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:32,textAlign:"center",color:C.cinzaTexto}}>
+            <div style={{fontSize:24,marginBottom:8}}>⏰</div>
+            <div style={{fontWeight:700,fontSize:15,color:C.texto,marginBottom:6}}>Atrasos por Faixa de Aging</div>
+            <div>Carregue um CSV para ver as coletas em atraso agrupadas por faixa de dias.</div>
+          </div>
+        :<AbaAtrasos rawRows={rawRows} filtrarPorPeriodo={filtrarPorPeriodo} sel={sel} lbl={lbl}/>
+      )}
+
+
+      {/* ══ SIMULAÇÃO ══ */}
+      {abaGlobal==="simulacao"&&(()=>{
+        const TAXA=11.24, GMV_MED=201.6, BASE_REV=2320;
+        const DIST={11:0,12:0.35,1:0.50,2:0.15};
+        const PESOS={"SAFARI MONTAGEM":51.7,"MOVEL SERVICE":14.4,"SALDAO CAMPINAS":12.9,"LOGME - TRANSPO":6.2,"OUTELETRO BH":5.6,"AGMX OPORTUNIDA":3.8,"KMAN MOVEIS":2.7,"ORC MOVEIS E EL":2.7};
+        const MESES_SIM=[{m:11,label:"Novembro",base:BASE_REV},{m:12,label:"Dezembro",base:Math.round(BASE_REV*0.83)},{m:1,label:"Janeiro",base:Math.round(BASE_REV*1.01)},{m:2,label:"Fevereiro",base:Math.round(BASE_REV*0.86)}];
+        const gmvEx=GMV_MED*(simAumentoVendas/100);
+        const cEx=m=>Math.round(gmvEx*(DIST[m.m]||0)*TAXA);
+        const totEx=MESES_SIM.reduce((a,m)=>a+cEx(m),0);
+        const totTot=MESES_SIM.reduce((a,m)=>a+m.base+cEx(m),0);
+        const totAtr=MESES_SIM.reduce((a,m)=>a+Math.round((m.base+cEx(m))*(1-simSLAEsperado/100)),0);
+        const p2=pill;
+        return <div style={{display:"flex",flexDirection:"column",gap:16}}>
+          <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:20}}>
+            <div style={{fontWeight:800,fontSize:16,marginBottom:6}}>📈 Simulação — Black Friday</div>
+            <div style={{fontSize:13,color:C.cinzaTexto,marginBottom:10}}>Calibrada com dados reais Jan/2025–Jun/2026 · Taxa {TAXA} rev/R$1M · Impacto começa na 2ª quinzena de Dez</div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              {[{l:"Taxa reversa",v:`${TAXA} rev/R$1M`,c:C.azul},{l:"Base mensal",v:`${BASE_REV.toLocaleString('pt-BR')} rev`,c:C.verde},{l:"GMV médio",v:`R$${GMV_MED}M`,c:C.roxo},{l:"Distribuição",v:"Dez 35% · Jan 50% · Fev 15%",c:C.laranja}].map(({l,v,c},i)=>(
+                <div key={i} style={{fontSize:11,background:C.cinzaFundo,border:`1px solid ${C.cinzaBorda}`,borderRadius:8,padding:"5px 12px"}}><span style={{color:C.cinzaTexto}}>{l}: </span><span style={{fontWeight:700,color:c}}>{v}</span></div>
+              ))}
+            </div>
+          </div>
+          <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:20}}>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:16}}>⚙️ Parâmetros</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:20}}>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:6}}>Aumento de Vendas BF</div>
+                <div style={{fontSize:11,color:C.cinzaTexto,marginBottom:8}}>Histórico BF/25: +79% vs mês médio</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>{[30,50,79,100,150].map(v=><button key={v} onClick={()=>setSimAumentoVendas(v)} style={p2(simAumentoVendas===v)}>+{v}%</button>)}</div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}><input type="range" min={10} max={200} value={simAumentoVendas} onChange={e=>setSimAumentoVendas(Number(e.target.value))} style={{flex:1,accentColor:C.laranja}}/><span style={{fontWeight:800,fontSize:20,color:C.laranja,minWidth:54}}>+{simAumentoVendas}%</span></div>
+                <div style={{fontSize:11,color:C.cinzaTexto,marginTop:4}}>GMV BF: <strong>R${Math.round(GMV_MED*(1+simAumentoVendas/100))}M</strong> · extra: R${Math.round(gmvEx)}M</div>
+              </div>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:6}}>SLA Esperado no Pico</div>
+                <div style={{fontSize:11,color:C.cinzaTexto,marginBottom:8}}>Meta global: 86%</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>{[78,80,82,84,86].map(v=><button key={v} onClick={()=>setSimSLAEsperado(v)} style={p2(simSLAEsperado===v,v>=86?C.verde:C.vermelho)}>{v}%</button>)}</div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}><input type="range" min={60} max={96} value={simSLAEsperado} onChange={e=>setSimSLAEsperado(Number(e.target.value))} style={{flex:1,accentColor:simSLAEsperado>=86?C.verde:C.vermelho}}/><span style={{fontWeight:800,fontSize:20,color:simSLAEsperado>=86?C.verde:C.vermelho,minWidth:48}}>{simSLAEsperado}%</span></div>
+              </div>
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
+            {[{l:"Reversas extras Dez–Fev",v:totEx.toLocaleString('pt-BR'),c:C.laranja},{l:"Total reversas no período",v:totTot.toLocaleString('pt-BR'),c:C.azul},{l:"Atrasos estimados",v:totAtr.toLocaleString('pt-BR'),c:C.vermelho},{l:"Aumento sobre base",v:`+${Math.round(totEx/MESES_SIM.reduce((a,m)=>a+m.base,0)*100)}%`,c:C.roxo}].map(({l,v,c},i)=>(
+              <div key={i} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"14px 18px",borderLeft:`4px solid ${c}`}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:4}}>{l}</div>
+                <div style={{fontSize:26,fontWeight:800,color:c,lineHeight:1}}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+            <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>Projeção Mensal</div>
+            <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:C.cinzaFundo}}>{["Mês","Contexto","Base","Extras BF","Total","% Impacto","Atrasos","Pressão"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Mês","Contexto"].includes(h)?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+              <tbody>{MESES_SIM.map((m,i)=>{
+                const e=cEx(m),t=m.base+e,at=Math.round(t*(1-simSLAEsperado/100)),d=(DIST[m.m]||0)*100,pr=t/m.base;
+                const cor=pr>=1.20?C.vermelho:pr>=1.08?C.amarelo:C.verde;const bg=pr>=1.20?C.vermelhoLight:pr>=1.08?C.amareloLight:C.verdeLight;
+                return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                  <td style={{padding:"8px 12px",fontWeight:700}}>{m.label}</td>
+                  <td style={{padding:"8px 12px",fontSize:11,color:C.cinzaTexto}}>{d>0?`${d}% do impacto BF`:"Vendas — sem reversas ainda"}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",color:C.cinzaTexto}}>{m.base.toLocaleString('pt-BR')}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",color:e>0?C.laranja:C.cinzaTexto,fontWeight:e>0?700:400}}>{e>0?`+${e}`:"—"}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700}}>{t.toLocaleString('pt-BR')}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",color:d>0?C.laranja:C.cinzaTexto}}>{d>0?`${d}%`:"—"}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",color:C.vermelho,fontWeight:600}}>{at}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center"}}><span style={{fontSize:11,background:bg,color:cor,padding:"3px 10px",borderRadius:999,fontWeight:700,whiteSpace:"nowrap"}}>{pr>=1.20?"🔴 Alta":pr>=1.08?"⚠️ Média":"✓ Normal"}{e>0?` (+${Math.round((pr-1)*100)}%)`:""}</span></td>
+                </tr>;
+              })}</tbody>
+            </table></div>
+          </div>
+          <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+            <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>Por Parceiro — Reversas Extras <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:400}}>peso histórico Abr–Jun/26</span></div>
+            <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:C.cinzaFundo}}>{["Parceiro","Peso","+ Dez","+ Jan","+ Fev","Total extras"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:h==="Parceiro"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+              <tbody>{Object.entries(PESOS).sort((a,b)=>b[1]-a[1]).map(([p,pct],i)=>{
+                const eDez=Math.round(totEx*0.35*pct/100),eJan=Math.round(totEx*0.50*pct/100),eFev=Math.round(totEx*0.15*pct/100);
+                return <tr key={p} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                  <td style={{padding:"8px 12px",fontWeight:600}}>{p}</td>
+                  <td style={{padding:"8px 12px"}}><div style={{display:"flex",alignItems:"center",gap:6}}><div style={{height:6,width:`${Math.max(pct*1.4,4)}px`,background:C.laranja,borderRadius:3}}/><span style={{color:C.cinzaTexto,fontSize:12}}>{pct}%</span></div></td>
+                  <td style={{padding:"8px 12px",textAlign:"center",color:C.laranja}}>+{eDez}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",color:C.vermelho,fontWeight:700}}>+{eJan}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",color:C.cinzaTexto}}>+{eFev}</td>
+                  <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700,color:C.laranja}}>+{eDez+eJan+eFev}</td>
+                </tr>;
+              })}</tbody>
+            </table></div>
+          </div>
+        </div>;
+      })()}
+
+
+      {/* ══ CONFIGURAÇÕES ══ */}
+      {abaGlobal==="config"&&<div style={{display:"flex",flexDirection:"column",gap:16}}>
+
+        {/* Cache de semanas */}
+        {weeklyExtra.length>0&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:14}}>💾 Cache de Semanas</div>
+            <div style={{fontSize:12,color:C.cinzaTexto,marginTop:2}}>Semanas salvas: <strong>S{weeklyExtra.map(w=>w.s).join(", S")}</strong></div>
+          </div>
+          <button onClick={()=>{if(!window.confirm("Limpar cache de semanas? Os dados serão recalculados no próximo upload.")) return;try{localStorage.removeItem("slaParca_weekly");localStorage.removeItem("slaParca_pd");}catch{}setWeeklyExtra([]);setPdExtra({});}} style={{fontSize:11,color:C.vermelho,background:C.vermelhoLight,border:`1px solid ${C.vermelho}`,borderRadius:6,padding:"4px 12px",cursor:"pointer",fontWeight:600}}>🗑️ Limpar cache</button>
+        </div>}
+
+        {/* Variações de volume */}
+        {variacaoVol.length>0&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.cinzaBorda}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><div style={{fontWeight:700,fontSize:14}}>📈 Variações de Volume entre Uploads</div><div style={{fontSize:12,color:C.cinzaTexto,marginTop:2}}>Diferenças detectadas ao subir novos CSVs.</div></div>
+            <button onClick={()=>{if(!window.confirm("Limpar histórico de variações?")) return;try{localStorage.removeItem("slaParca_var");}catch{}setVariacaoVol([]);}} style={{fontSize:11,color:C.cinzaTexto,background:C.cinzaFundo,border:`1px solid ${C.cinzaBorda}`,borderRadius:6,padding:"4px 12px",cursor:"pointer"}}>🗑️ Limpar</button>
+          </div>
+          <div style={{display:"flex",flexDirection:"column"}}>
+            {[...variacaoVol].reverse().map((entry,ei)=>(
+              <div key={ei} style={{borderTop:ei>0?`1px solid ${C.cinzaBorda}`:"none"}}>
+                <div style={{padding:"8px 20px",background:C.cinzaFundo,display:"flex",gap:12,alignItems:"center"}}>
+                  <span style={{fontSize:11,color:C.cinzaTexto}}>{entry.data}</span>
+                  <span style={{fontSize:12,fontWeight:700}}>{entry.arquivo}</span>
+                </div>
+                {(entry.variacoes||[]).map((v,vi)=>{
+                  const cor=v.efetDiff>0?C.verde:C.vermelho;const bg=v.efetDiff>0?C.verdeLight:C.vermelhoLight;
+                  return <div key={vi} style={{padding:"10px 20px",borderTop:`1px solid ${C.cinzaBorda}`,display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
+                    <span style={{fontWeight:800,fontSize:14,minWidth:36}}>S{v.semana}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:8,background:C.cinzaFundo,borderRadius:8,padding:"5px 12px"}}>
+                      <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:700}}>EFETIVADAS</span>
+                      <span style={{color:C.cinzaTexto}}>{v.efetAntes}→{v.efetDepois}</span>
+                      <span style={{fontWeight:800,color:cor,background:bg,padding:"1px 8px",borderRadius:5}}>{v.efetDiff>0?"+":""}{v.efetDiff}</span>
+                    </div>
+                  </div>;
+                })}
+              </div>
+            ))}
+          </div>
+        </div>}
+
+        {/* Histórico de uploads */}
+        <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.cinzaBorda}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><div style={{fontWeight:700,fontSize:14}}>📂 Histórico de Uploads</div><div style={{fontSize:12,color:C.cinzaTexto,marginTop:2}}>CSVs importados — salvo entre sessões.</div></div>
+            {uploadHistory.length>0&&<button onClick={()=>{if(!window.confirm("Limpar histórico?")) return;try{localStorage.removeItem("slaParca_hist");}catch{}setUploadHistory([]);}} style={{fontSize:11,color:C.cinzaTexto,background:C.cinzaFundo,border:`1px solid ${C.cinzaBorda}`,borderRadius:6,padding:"4px 12px",cursor:"pointer"}}>🗑️ Limpar</button>}
+          </div>
+          {uploadHistory.length===0
+            ?<div style={{padding:20,color:C.cinzaTexto,fontSize:13,textAlign:"center"}}>Nenhum CSV importado ainda.</div>
+            :<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:C.cinzaFundo}}>{["#","Arquivo","Data / Hora","Linhas"].map(h=><th key={h} style={{padding:"8px 14px",textAlign:h==="Arquivo"?"left":"center",fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
+              <tbody>{[...uploadHistory].reverse().map((u,i)=>(
+                <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i===0?C.verdeLight:"transparent"}}>
+                  <td style={{padding:"8px 14px",textAlign:"center",color:C.cinzaTexto}}>{uploadHistory.length-i}</td>
+                  <td style={{padding:"8px 14px",fontWeight:600}}>{u.nome}</td>
+                  <td style={{padding:"8px 14px",textAlign:"center",color:C.cinzaTexto}}>{u.data}</td>
+                  <td style={{padding:"8px 14px",textAlign:"center",color:C.cinzaTexto}}>{u.total?.toLocaleString()}</td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+          }
+        </div>
+
+        {/* Roadmap */}
+        <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+          <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.cinzaBorda}`,background:C.azulLight}}>
+            <div style={{fontWeight:700,fontSize:14,color:C.azul}}>🚀 Roadmap</div>
+          </div>
+          {[
+            {h:"2025–2026",items:[{t:"Metas Dinâmicas por Parceiro",d:"Editar metas direto no dashboard"},{t:"Metas Sazonais",d:"Metas diferentes por mês/trimestre"},{t:"Alerta de Tendência Consecutiva",d:"3+ semanas em queda no mesmo indicador"},{t:"Projeção de SLA para o Fim da Semana",d:"Estimativa com dados parciais"}]},
+            {h:"2027+",items:[{t:"Mapa de Calor por Dia da Semana",d:"SLA por dia da semana"},{t:"Tempo Solicitação → Agendamento",d:"Gap não medido hoje"},{t:"Reincidência de Problemas",d:"Pedidos com problema repetido"},{t:"Registro de Ações do Time",d:"Fechar ciclo análise → ação"},{t:"Benchmark entre Parceiros",d:"Por faixa de volume"},{t:"Exportação PDF para Reuniões",d:"PDF formatado com um clique"}]},
+          ].map(({h,items},gi)=>(
+            <div key={gi}>
+              <div style={{padding:"8px 20px",background:C.cinzaFundo,borderTop:`1px solid ${C.cinzaBorda}`}}><span style={{fontSize:11,fontWeight:700,color:C.azul,textTransform:"uppercase"}}>{h}</span></div>
+              {items.map((item,i)=>(
+                <div key={i} style={{padding:"12px 20px",borderTop:`1px solid ${C.cinzaBorda}`,display:"flex",gap:12,alignItems:"flex-start"}}>
+                  <span style={{fontSize:10,background:C.azulLight,color:C.azul,padding:"2px 8px",borderRadius:999,fontWeight:700,flexShrink:0,marginTop:2}}>Planejado</span>
+                  <div><div style={{fontWeight:700,fontSize:13,marginBottom:2}}>{item.t}</div><div style={{fontSize:12,color:C.cinzaTexto}}>{item.d}</div></div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+
+      </div>}
+
+    </div>
+  </div>;
+}
