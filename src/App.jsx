@@ -157,6 +157,140 @@ const Chip = ({v, m, inv, unit}) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Componente AbaProblemas
+// ══════════════════════════════════════════════════════════════════════════════
+const AbaProblemas = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
+  const [parcSel, setParcSel] = useState([]);
+
+  const parcs = useMemo(()=>[...new Set(
+    rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&(r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1))
+      .map(r=>r["Transportadora"]).filter(Boolean)
+  )].sort(),[rawRows]);
+
+  useEffect(()=>{ if(parcs.length>0) setParcSel(parcs); },[parcs.join(",")]);
+
+  const sm=(on,cor)=>({padding:"3px 8px",fontSize:11,borderRadius:999,border:`1.5px solid ${on?cor:C.cinzaBorda}`,background:on?`${cor}18`:"transparent",cursor:"pointer",fontWeight:600,color:on?cor:C.cinzaTexto});
+
+  const ACOES_P = {"Cliente ausente":"Acionar cliente 24h antes","Telefone Inválido":"Atualizar contato","NF errada":"Verificar documentação","Cliente desistiu":"Contato preventivo","Endereço não localizado":"Validar endereço"};
+
+  const base = useMemo(()=>
+    filtrarPorPeriodo(rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&(r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1)))
+      .filter(r=>parcSel.length===0||parcSel.includes(r["Transportadora"]))
+  ,[rawRows,filtrarPorPeriodo,parcSel]);
+
+  const totalProb = base.length;
+  const comAtraso = base.filter(r=>norm(r["Vencido"])==="Sim").length;
+
+  const motGeralMap = {};
+  base.forEach(r=>{
+    const m=r["Problema Motivo"]||"Sem motivo";
+    if(!motGeralMap[m])motGeralMap[m]={c:0,a:0};
+    motGeralMap[m].c++; if(norm(r["Vencido"])==="Sim")motGeralMap[m].a++;
+  });
+  const motGeral = Object.entries(motGeralMap).sort((a,b)=>b[1].c-a[1].c);
+
+  return <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+    {/* Filtro parceiros */}
+    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3}}>Parceiros</div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setParcSel(parcs)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todos</button>
+          <button onClick={()=>setParcSel([])}    style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhum</button>
+        </div>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+        {parcs.map((p,i)=><button key={p} onClick={()=>setParcSel(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p])} style={sm(parcSel.includes(p),PARC_CORES[i%PARC_CORES.length])}>{p.split(" ")[0]}</button>)}
+      </div>
+    </div>
+
+    {/* KPIs */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
+      {[
+        {l:"Total de problemas",v:totalProb.toLocaleString("pt-BR"),c:C.laranja},
+        {l:"Com atraso (Vencido=Sim)",v:comAtraso.toLocaleString("pt-BR"),c:C.vermelho},
+        {l:"Sem atraso",v:(totalProb-comAtraso).toLocaleString("pt-BR"),c:C.verde},
+        {l:"% com atraso",v:totalProb>0?`${Math.round(comAtraso/totalProb*100)}%`:"—",c:C.amarelo},
+      ].map(({l,v,c},i)=>(
+        <div key={i} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"14px 18px",borderLeft:`4px solid ${c}`}}>
+          <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:4}}>{l}</div>
+          <div style={{fontSize:26,fontWeight:800,color:c,lineHeight:1}}>{v}</div>
+        </div>
+      ))}
+    </div>
+
+    {/* Ranking geral */}
+    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>
+        Ranking de Motivos — {sel.map(p=>lbl(p)).join(", ")}
+      </div>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+        <thead><tr style={{background:C.cinzaFundo}}>{["Motivo","Ocorr.","% total","c/ Atraso","% c/ atraso","Ação sugerida"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Motivo","Ação sugerida"].includes(h)?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+        <tbody>{motGeral.map(([mot,v],i)=>(
+          <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+            <td style={{padding:"8px 12px",fontWeight:500}}>{mot}</td>
+            <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700}}>{v.c}</td>
+            <td style={{padding:"8px 12px",textAlign:"center",color:C.cinzaTexto}}>{Math.round(v.c/totalProb*100)}%</td>
+            <td style={{padding:"8px 12px",textAlign:"center",color:v.a>0?C.vermelho:C.cinzaTexto,fontWeight:v.a>0?700:400}}>{v.a}</td>
+            <td style={{padding:"8px 12px",textAlign:"center",color:v.a>0?C.vermelho:C.cinzaTexto}}>{v.c>0?`${Math.round(v.a/v.c*100)}%`:"—"}</td>
+            <td style={{padding:"8px 12px",fontSize:11,color:C.azul}}>{ACOES_P[mot]||"Investigar causa"}</td>
+          </tr>
+        ))}</tbody>
+      </table></div>
+    </div>
+
+    {/* Por parceiro — tabela resumo */}
+    {parcs.length>0&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>Por Parceiro</div>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+        <thead><tr style={{background:C.cinzaFundo}}>{["Parceiro","Problemas","% total","c/ Atraso","% c/ atraso","Motivo principal"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Parceiro","Motivo principal"].includes(h)?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+        <tbody>{parcs.filter(p=>parcSel.includes(p)).map((p,i)=>{
+          const rowsP=base.filter(r=>r["Transportadora"]===p);
+          if(!rowsP.length) return null;
+          const atr=rowsP.filter(r=>norm(r["Vencido"])==="Sim").length;
+          const motP={};rowsP.forEach(r=>{const m=r["Problema Motivo"]||"Sem motivo";motP[m]=(motP[m]||0)+1;});
+          const topMot=Object.entries(motP).sort((a,b)=>b[1]-a[1])[0];
+          return <tr key={p} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+            <td style={{padding:"8px 12px",fontWeight:600,color:PARC_CORES[i%PARC_CORES.length]}}>{p}</td>
+            <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700,color:C.laranja}}>{rowsP.length}</td>
+            <td style={{padding:"8px 12px",textAlign:"center",color:C.cinzaTexto}}>{Math.round(rowsP.length/totalProb*100)}%</td>
+            <td style={{padding:"8px 12px",textAlign:"center",color:atr>0?C.vermelho:C.cinzaTexto,fontWeight:atr>0?700:400}}>{atr}</td>
+            <td style={{padding:"8px 12px",textAlign:"center",color:atr>0?C.vermelho:C.cinzaTexto}}>{rowsP.length>0?`${Math.round(atr/rowsP.length*100)}%`:"—"}</td>
+            <td style={{padding:"8px 12px",fontSize:11,color:C.cinzaTexto}}>{topMot?`${topMot[0]} (${topMot[1]})`:"—"}</td>
+          </tr>;
+        }).filter(Boolean)}</tbody>
+      </table></div>
+    </div>}
+
+    {/* Detalhe por parceiro */}
+    {parcs.filter(p=>parcSel.includes(p)).map((p,pi)=>{
+      const rowsP=base.filter(r=>r["Transportadora"]===p);
+      if(!rowsP.length) return null;
+      const motP={};
+      rowsP.forEach(r=>{const m=r["Problema Motivo"]||"Sem motivo";if(!motP[m])motP[m]={c:0,a:0,cids:{}};motP[m].c++;if(norm(r["Vencido"])==="Sim")motP[m].a++;const c=r["Cidade"]||"N/A";motP[m].cids[c]=(motP[m].cids[c]||0)+1;});
+      return <div key={p} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13,color:PARC_CORES[pi%PARC_CORES.length]}}>
+          {p} — {rowsP.length} problemas · {rowsP.filter(r=>norm(r["Vencido"])==="Sim").length} com atraso
+        </div>
+        <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead><tr style={{background:C.cinzaFundo}}>{["Motivo","Ocorr.","c/ Atraso","Cidade principal","Ação sugerida"].map(h=><th key={h} style={{padding:"7px 12px",textAlign:["Motivo","Cidade principal","Ação sugerida"].includes(h)?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
+          <tbody>{Object.entries(motP).sort((a,b)=>b[1].c-a[1].c).map(([mot,v],i)=>(
+            <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+              <td style={{padding:"7px 12px",fontWeight:500}}>{mot}</td>
+              <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700}}>{v.c}</td>
+              <td style={{padding:"7px 12px",textAlign:"center",color:v.a>0?C.vermelho:C.cinzaTexto,fontWeight:v.a>0?700:400}}>{v.a}</td>
+              <td style={{padding:"7px 12px",fontSize:11,color:C.cinzaTexto}}>{Object.entries(v.cids).sort((a,b)=>b[1]-a[1])[0]?.[0]||"—"}</td>
+              <td style={{padding:"7px 12px",fontSize:11,color:C.azul}}>{ACOES_P[mot]||"Investigar causa"}</td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </div>;
+    }).filter(Boolean)}
+  </div>;
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Componente AbaAtrasos (precisa de hooks próprios — componente separado)
 // ══════════════════════════════════════════════════════════════════════════════
 const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
