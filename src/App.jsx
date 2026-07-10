@@ -44,26 +44,38 @@ const sem = (v, meta, inv) => {
 
 // ── CSV Parser ─────────────────────────────────────────────────────────────────
 const parseCSV = (text) => {
-  const lines = text.replace(/\r/g,"").split("\n").filter(l=>l.trim());
-  const sep = lines[0].includes(";") ? ";" : ",";
-  const parseRow = line => {
-    const cells=[]; let cur="", inQ=false;
-    for(let i=0;i<line.length;i++){
-      const ch=line[i];
-      if(ch==='"'){if(inQ&&line[i+1]==='"'){cur+='"';i++;}else inQ=!inQ;}
-      else if(ch===sep&&!inQ){cells.push(cur);cur="";}
-      else cur+=ch;
+  const sep = text.split("\n")[0].includes(";") ? ";" : ",";
+  // Parser que lida com campos multilinhas (texto com \n dentro de aspas)
+  const rows = [];
+  let cur = "", inQ = false, fields = [], i = 0;
+  const raw = text.replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  while(i <= raw.length){
+    const ch = raw[i];
+    if(ch === '"'){
+      if(inQ && raw[i+1] === '"'){ cur += '"'; i+=2; continue; }
+      inQ = !inQ; i++; continue;
     }
-    cells.push(cur);
-    return cells.map(c=>c.trim().replace(/^"|"$/g,""));
-  };
-  const headers = parseRow(lines[0]);
-  return lines.slice(1).map(line=>{
-    const vals = parseRow(line);
-    const row = {};
-    headers.forEach((h,i)=>{ row[h.trim()] = vals[i]??""});
-    return row;
-  }).filter(r=>Object.values(r).some(v=>v!==""));
+    if((ch === sep || ch === undefined) && !inQ){
+      fields.push(cur.trim()); cur = "";
+      if(ch === undefined || raw[i+1] === undefined){ rows.push(fields); fields = []; }
+      i++; continue;
+    }
+    if(ch === "\n" && !inQ){
+      fields.push(cur.trim()); cur = "";
+      rows.push(fields); fields = [];
+      i++; continue;
+    }
+    cur += (ch===undefined?"":ch); i++;
+  }
+  if(fields.length>0) rows.push(fields);
+  const headers = rows[0]||[];
+  return rows.slice(1)
+    .filter(r=>r.some(v=>v!==""))
+    .map(vals=>{
+      const row={};
+      headers.forEach((h,i)=>{ row[h.trim()]=(vals[i]??"").replace(/^"|"$/g,""); });
+      return row;
+    });
 };
 
 // ── Feriados nacionais BR 2026 ────────────────────────────────────────────────
@@ -145,7 +157,6 @@ const Chip = ({v, m, inv, unit}) => {
 // ══════════════════════════════════════════════════════════════════════════════
 const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
   const [parcSel, setParcSel] = useState([]);
-  const [modo, setModo] = useState("coletados");
 
   const parcs = useMemo(()=>[...new Set(
     rawRows.filter(r=>r["Transportadora"]).map(r=>r["Transportadora"]).filter(Boolean)
@@ -156,7 +167,8 @@ const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
   const pill=(on,cor=C.laranja)=>({padding:"4px 12px",borderRadius:999,border:`1.5px solid ${on?cor:C.cinzaBorda}`,background:on?`${cor}18`:"transparent",cursor:"pointer",fontSize:12,fontWeight:600,color:on?cor:C.cinzaTexto});
   const sm=(on,cor)=>({...pill(on,cor),padding:"3px 8px",fontSize:11});
 
-  const baseColetados = useMemo(()=>
+  // Coletados fora do SLA: Vencido=Sim + tem data de coleta
+  const base = useMemo(()=>
     filtrarPorPeriodo(rawRows.filter(r=>
       r["Flag Situacao Coleta"]==="Coletado" &&
       norm(r["Vencido"])==="Sim" &&
@@ -164,27 +176,11 @@ const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
     )).filter(r=>parcSel.length===0||parcSel.includes(r["Transportadora"]))
   ,[rawRows, filtrarPorPeriodo, parcSel]);
 
-  const baseAberto = useMemo(()=>
-    rawRows.filter(r=>
-      (!r["Data Coleta Efetivada Date"]||r["Data Coleta Efetivada Date"]==="--"||r["Data Coleta Efetivada Date"]==="") &&
-      r["Data Solicitacao Date"] && r["Data Solicitacao Date"]!=="--" &&
-      (parcSel.length===0||parcSel.includes(r["Transportadora"]))
-    )
-  ,[rawRows, parcSel]);
-
-  const base = modo==="coletados"?baseColetados:modo==="aberto"?baseAberto:[...baseColetados,...baseAberto];
-
   const comAging = useMemo(()=>base.map(r=>{
     const d1=r["Data Solicitacao Date"], d2=r["Data Coleta Efetivada Date"];
-    if(!d1||d1==="--") return null;
-    if(d2&&d2!=="--"&&d2!==""){
-      const dias=busdays(d1,d2);
-      return dias!=null&&dias>=0?{...r,diasAtraso:dias,status:"coletado"}:null;
-    } else {
-      const [dd,dm,dy]=d1.split("/"); const dt1=new Date(dy,dm-1,dd);
-      const dias=Math.round((new Date()-dt1)/86400000);
-      return dias>=0?{...r,diasAtraso:dias,status:"aberto"}:null;
-    }
+    if(!d1||d1==="--"||!d2||d2==="--") return null;
+    const dias=busdays(d1,d2);
+    return dias!=null&&dias>=0?{...r,diasAtraso:dias}:null;
   }).filter(Boolean),[base]);
 
   const porFaixa = FAIXAS_AGING.map(f=>({...f,count:comAging.filter(r=>r.diasAtraso>=f.min&&r.diasAtraso<=f.max).length}));
@@ -192,54 +188,49 @@ const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
   const parcComDados = parcs.filter(p=>comAging.some(r=>r["Transportadora"]===p));
 
   const topCidades = useMemo(()=>{
-    const src=modo==="aberto"?[]:comAging.filter(r=>r.status==="coletado");
-    if(!src.length) return [];
+    if(!comAging.length) return [];
     const cidMap={};
-    src.forEach(r=>{
+    comAging.forEach(r=>{
       const key=`${r["Cidade"]||"N/A"} (${r["Estado"]||""})`;
-      if(!cidMap[key])cidMap[key]={total:0,atraso:0,parc:{}};
-      cidMap[key].total++; cidMap[key].atraso++;
+      if(!cidMap[key])cidMap[key]={total:0,parc:{}};
+      cidMap[key].total++;
       const p=r["Transportadora"]||"—"; cidMap[key].parc[p]=(cidMap[key].parc[p]||0)+1;
     });
     return Object.entries(cidMap).filter(([,v])=>v.total>=3)
-      .map(([loc,v])=>({loc,total:v.total,atraso:v.atraso,pct:Math.round(v.atraso/v.total*10000)/100,top:Object.entries(v.parc).sort((a,b)=>b[1]-a[1])[0]}))
-      .sort((a,b)=>b.atraso-a.atraso).slice(0,10);
-  },[comAging,modo]);
+      .map(([loc,v])=>({loc,total:v.total,top:Object.entries(v.parc).sort((a,b)=>b[1]-a[1])[0]}))
+      .sort((a,b)=>b.total-a.total).slice(0,10);
+  },[comAging]);
+
+  const faixaLabel = dias => {
+    if(dias>=25) return {label:"≥ 25d", cor:"#7F1D1D", bg:"#FEE2E2"};
+    if(dias>=20) return {label:"≥ 20d", cor:C.vermelho, bg:C.vermelhoLight};
+    if(dias>=15) return {label:"≥ 15d", cor:C.roxo,    bg:C.roxoLight};
+    if(dias>=10) return {label:"≥ 10d", cor:C.laranja,  bg:"#FFF7ED"};
+    return          {label:"≥ 5d",  cor:C.amarelo, bg:C.amareloLight};
+  };
 
   return <div style={{display:"flex",flexDirection:"column",gap:14}}>
-    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:16}}>
-      <div style={{display:"flex",gap:24,flexWrap:"wrap",alignItems:"flex-start"}}>
-        <div>
-          <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:8}}>Situação</div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
-            {[["coletados","✓ Vencido = Sim",C.vermelho],["aberto","⏳ Em aberto",C.amarelo],["todos","Todos",C.cinzaTexto]].map(([v,l,c])=>(
-              <button key={v} onClick={()=>setModo(v)} style={pill(modo===v,c)}>{l}</button>
-            ))}
-          </div>
-          <div style={{fontSize:11,color:C.cinzaTexto}}>
-            {modo==="coletados"&&"Pedidos coletados após o prazo (Vencido=Sim). Aging em dias úteis excl. feriados."}
-            {modo==="aberto"&&"Pedidos sem data de coleta — ainda não coletados. Aging em dias corridos até hoje."}
-            {modo==="todos"&&"Coletados fora do SLA + em aberto."}
-          </div>
+
+    {/* Filtro parceiros */}
+    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3}}>
+          Parceiros · <span style={{color:C.vermelho}}>Coletados fora do SLA (Vencido = Sim)</span> · Aging em dias úteis
         </div>
-        <div style={{flex:1,minWidth:200}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>Parceiros</div>
-            <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>setParcSel(parcs)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todos</button>
-              <button onClick={()=>setParcSel([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhum</button>
-            </div>
-          </div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-            {parcs.map((p,i)=><button key={p} onClick={()=>setParcSel(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p])} style={sm(parcSel.includes(p),PARC_CORES[i%PARC_CORES.length])}>{p.split(" ")[0]}</button>)}
-          </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setParcSel(parcs)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todos</button>
+          <button onClick={()=>setParcSel([])}    style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhum</button>
         </div>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+        {parcs.map((p,i)=><button key={p} onClick={()=>setParcSel(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p])} style={sm(parcSel.includes(p),PARC_CORES[i%PARC_CORES.length])}>{p.split(" ")[0]}</button>)}
       </div>
     </div>
 
+    {/* KPIs por faixa */}
     <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:18}}>
       <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>
-        {modo==="coletados"?"✓ Coletados fora do SLA":modo==="aberto"?"⏳ Em aberto":"Todos"}
+        ✓ Coletados fora do SLA
         <span style={{fontSize:12,color:C.cinzaTexto,fontWeight:400,marginLeft:8}}>{total} pedidos · {sel.map(p=>lbl(p)).join(", ")}</span>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:10}}>
@@ -253,6 +244,7 @@ const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
       </div>
     </div>
 
+    {/* Por parceiro */}
     {parcComDados.length>0&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
       <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>Por Parceiro</div>
       <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
@@ -268,22 +260,23 @@ const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
       </table></div>
     </div>}
 
+    {/* Top Cidades */}
     {topCidades.length>0&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
-      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>🗺️ Top Cidades — Mais atrasos (Vencido = Sim)</div>
+      <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>🗺️ Top Cidades — Mais atrasos</div>
       <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-        <thead><tr style={{background:C.cinzaFundo}}>{["#","Cidade / Estado","Atrasos","Total","% Atraso","Principal parceiro"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Cidade / Estado","Principal parceiro"].includes(h)?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
-        <tbody>{topCidades.map((c,i)=>{const cor=c.pct>30?C.vermelho:c.pct>15?C.amarelo:C.cinzaTexto;const bg=c.pct>30?C.vermelhoLight:c.pct>15?C.amareloLight:"transparent";return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:bg}}>
-          <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700,color:cor}}>{i+1}</td>
-          <td style={{padding:"7px 12px",fontWeight:600}}>{c.loc}</td>
-          <td style={{padding:"7px 12px",textAlign:"center",fontWeight:800,color:C.vermelho,fontSize:15}}>{c.atraso}</td>
-          <td style={{padding:"7px 12px",textAlign:"center",color:C.cinzaTexto}}>{c.total}</td>
-          <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700,color:cor}}>{c.pct.toFixed(1)}%</td>
-          <td style={{padding:"7px 12px",fontSize:12,color:C.cinzaTexto}}>{c.top&&<span>{c.top[0].split(" ")[0]} <span style={{color:C.vermelho,fontWeight:700}}>({c.top[1]})</span></span>}</td>
-        </tr>;})}
-        </tbody>
+        <thead><tr style={{background:C.cinzaFundo}}>{["#","Cidade / Estado","Atrasos","Principal parceiro"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Cidade / Estado","Principal parceiro"].includes(h)?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+        <tbody>{topCidades.map((c,i)=>(
+          <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+            <td style={{padding:"7px 12px",textAlign:"center",fontWeight:700,color:C.vermelho}}>{i+1}</td>
+            <td style={{padding:"7px 12px",fontWeight:600}}>{c.loc}</td>
+            <td style={{padding:"7px 12px",textAlign:"center",fontWeight:800,color:C.vermelho,fontSize:15}}>{c.total}</td>
+            <td style={{padding:"7px 12px",fontSize:12,color:C.cinzaTexto}}>{c.top&&<span>{c.top[0].split(" ")[0]} <span style={{color:C.vermelho,fontWeight:700}}>({c.top[1]})</span></span>}</td>
+          </tr>
+        ))}</tbody>
       </table></div>
     </div>}
 
+    {/* Detalhe */}
     <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
       <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <span style={{fontWeight:700,fontSize:13}}>Detalhe dos Pedidos</span>
@@ -291,23 +284,37 @@ const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
       </div>
       <div style={{overflowX:"auto",maxHeight:440,overflowY:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-          <thead style={{position:"sticky",top:0,zIndex:1}}><tr style={{background:C.cinzaFundo}}>
-            {["Pedido","Parceiro","Cidade","UF","Dias úteis","Solicitação","Data Coleta","Status"].map(h=><th key={h} style={{padding:"7px 12px",textAlign:h.includes("Dias")?"center":"left",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
-          </tr></thead>
-          <tbody>{[...comAging].sort((a,b)=>b.diasAtraso-a.diasAtraso).map((r,i)=>{
-            const faixa=FAIXAS_AGING.slice().reverse().find(f=>r.diasAtraso>=f.min)||FAIXAS_AGING[0];
-            const aberto=r.status==="aberto";
-            return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
-              <td style={{padding:"6px 12px",fontWeight:600,fontFamily:"monospace",fontSize:11}}>{r["Pv"]||"—"}</td>
-              <td style={{padding:"6px 12px",fontSize:11}}>{(r["Transportadora"]||"").split(" ")[0]}</td>
-              <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Cidade"]||"—"}</td>
-              <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Estado"]||"—"}</td>
-              <td style={{padding:"6px 12px",textAlign:"center"}}><span style={{fontWeight:800,color:faixa.cor,background:faixa.bg,padding:"2px 8px",borderRadius:6}}>{r.diasAtraso}d</span></td>
-              <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Data Solicitacao Date"]||"—"}</td>
-              <td style={{padding:"6px 12px",fontSize:11}}>{aberto?<span style={{color:C.amarelo,fontWeight:700}}>⏳ Em aberto</span>:<span style={{color:C.cinzaTexto}}>{r["Data Coleta Efetivada Date"]}</span>}</td>
-              <td style={{padding:"6px 12px",fontSize:11}}>{aberto?<span style={{background:C.amareloLight,color:C.amarelo,padding:"1px 6px",borderRadius:4,fontWeight:700,fontSize:10}}>Aberto</span>:<span style={{background:C.vermelhoLight,color:C.vermelho,padding:"1px 6px",borderRadius:4,fontWeight:700,fontSize:10}}>Vencido</span>}</td>
-            </tr>;
-          })}</tbody>
+          <thead style={{position:"sticky",top:0,zIndex:1}}>
+            <tr style={{background:C.cinzaFundo}}>
+              {["Pedido","Parceiro","Cidade","UF","Dias úteis","Classificação","Solicitação","Data Coleta","Prob. Coleta"].map(h=>
+                <th key={h} style={{padding:"7px 12px",textAlign:["Dias úteis"].includes(h)?"center":"left",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>
+              )}
+            </tr>
+          </thead>
+          <tbody>
+            {[...comAging].sort((a,b)=>b.diasAtraso-a.diasAtraso).map((r,i)=>{
+              const f=faixaLabel(r.diasAtraso);
+              const temProb=r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1;
+              return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                <td style={{padding:"6px 12px",fontWeight:600,fontFamily:"monospace",fontSize:11}}>{r["Pv"]||"—"}</td>
+                <td style={{padding:"6px 12px",fontSize:11}}>{(r["Transportadora"]||"").split(" ")[0]}</td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Cidade"]||"—"}</td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Estado"]||"—"}</td>
+                <td style={{padding:"6px 12px",textAlign:"center",fontWeight:800,color:f.cor,fontSize:13}}>{r.diasAtraso}d</td>
+                <td style={{padding:"6px 12px"}}>
+                  <span style={{fontWeight:700,color:f.cor,background:f.bg,padding:"2px 10px",borderRadius:6,fontSize:11,whiteSpace:"nowrap"}}>{f.label}</span>
+                </td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Data Solicitacao Date"]||"—"}</td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Data Coleta Efetivada Date"]||"—"}</td>
+                <td style={{padding:"6px 12px",fontSize:11}}>
+                  {temProb
+                    ?<span style={{background:C.vermelhoLight,color:C.vermelho,padding:"1px 8px",borderRadius:4,fontWeight:700,fontSize:10}}>⚠️ Sim</span>
+                    :<span style={{color:C.cinzaTexto}}>—</span>
+                  }
+                </td>
+              </tr>;
+            })}
+          </tbody>
         </table>
       </div>
     </div>
@@ -965,7 +972,8 @@ export default function App() {
             <div>Carregue um CSV para ver a análise de problemas.</div>
           </div>
         :(()=>{
-          const base=filtrarPorPeriodo(rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&(r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1)));
+          const base=filtrarPorPeriodo(rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&(r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1)))
+            .filter(r=>parceiros.length===0||parceiros.includes(r["Transportadora"]));
 
           // KPIs gerais
           const totalProb=base.length;
