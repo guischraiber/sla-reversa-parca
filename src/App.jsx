@@ -571,14 +571,24 @@ export default function App() {
 
   // ── snapGeral ──────────────────────────────────────────────────────────────
   const snapGeral = useMemo(()=>{
-    const rows = sel.map(p=>WEEKLY_MERGED.find(w=>w.s===p)).filter(Boolean);
+    let rows = [];
+    if(granular==="semana"){
+      rows = sel.map(p=>WEEKLY_MERGED.find(w=>w.s===p)).filter(Boolean);
+    } else if(granular==="mes"){
+      rows = sel.map(m=>monthlyData.find(d=>d.m===m)).filter(Boolean);
+    } else if(granular==="trim"){
+      rows = sel.flatMap(t=>(TRIM_MESES[t]||[]).map(m=>monthlyData.find(d=>d.m===m)).filter(Boolean));
+    } else {
+      // ano — todos os meses disponíveis
+      rows = monthlyData;
+    }
     if(!rows.length) return {};
     const total=rows.reduce((a,r)=>a+r.total,0);
     const getW=key=>{let s=0,t=0;rows.forEach(r=>{if(r[key]!=null){s+=r[key]*r.total;t+=r.total;}});return t?Math.round(s/t*100)/100:null;};
     const obj={total};
     INDICADORES.forEach(i=>{obj[i.key]=getW(semFiltro?i.spKey:i.key);});
     return obj;
-  },[sel,WEEKLY_MERGED,semFiltro]);
+  },[granular,sel,WEEKLY_MERGED,monthlyData,semFiltro]);
 
   // ── snapParceiros ──────────────────────────────────────────────────────────
   const snapParceiros = useMemo(()=>parceiros.map(p=>{
@@ -960,12 +970,36 @@ export default function App() {
               {["Período","Coletas",...INDICADORES.filter(i=>indicSel.includes(i.key)).map(i=>i.label),"Prob.","Tendência"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:["Período","Tendência"].includes(h)||h==="Prob."?"center":h==="Coletas"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
             </tr></thead>
             <tbody>{(()=>{
-              const rows=[...WEEKLY_MERGED.filter(w=>sel.includes(w.s))].reverse();
-              return rows.map((w,i)=>{
-                const prev=rows[i+1];
+              // Fonte de dados correta por granularidade
+              let histRows = [];
+              if(granular==="semana"){
+                histRows = [...WEEKLY_MERGED.filter(w=>sel.includes(w.s))].reverse().map(w=>({...w,label:`S${w.s}`}));
+              } else if(granular==="mes"){
+                histRows = [...monthlyData.filter(d=>sel.includes(d.m))].reverse().map(d=>({...d,s:d.m,label:MESES_NOME[d.m]}));
+              } else if(granular==="trim"){
+                histRows = sel.map(t=>{
+                  const ms=(TRIM_MESES[t]||[]).map(m=>monthlyData.find(d=>d.m===m)).filter(Boolean);
+                  if(!ms.length) return null;
+                  const total=ms.reduce((a,r)=>a+r.total,0);
+                  const getW=key=>{let s=0,tv=0;ms.forEach(r=>{if(r[key]!=null){s+=r[key]*r.total;tv+=r.total;}});return tv?Math.round(s/tv*100)/100:null;};
+                  const obj={s:t,label:`T${t}`,total,prob:ms.reduce((a,r)=>a+(r.prob||0),0)};
+                  INDICADORES.forEach(i=>{obj[i.key]=getW(i.key);obj[i.spKey]=getW(i.spKey);});
+                  return obj;
+                }).filter(Boolean).reverse();
+              } else {
+                const all=monthlyData;
+                if(!all.length) return null;
+                const total=all.reduce((a,r)=>a+r.total,0);
+                const getW=key=>{let s=0,t=0;all.forEach(r=>{if(r[key]!=null){s+=r[key]*r.total;t+=r.total;}});return t?Math.round(s/t*100)/100:null;};
+                const obj={s:"2026",label:"2026",total,prob:all.reduce((a,r)=>a+(r.prob||0),0)};
+                INDICADORES.forEach(i=>{obj[i.key]=getW(i.key);obj[i.spKey]=getW(i.spKey);});
+                histRows = [obj];
+              }
+              return histRows.map((w,i)=>{
+                const prev=histRows[i+1];
                 const inds=INDICADORES.filter(ind=>indicSel.includes(ind.key));
                 return <tr key={w.s} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i===0?"#FFFBF5":"transparent"}}>
-                  <td style={{padding:"7px 12px",fontWeight:700,textAlign:"center"}}>S{w.s}{i===0&&<span style={{fontSize:10,color:C.laranja,marginLeft:4}}>↑</span>}</td>
+                  <td style={{padding:"7px 12px",fontWeight:700,textAlign:"center"}}>{w.label}{i===0&&<span style={{fontSize:10,color:C.laranja,marginLeft:4}}>↑</span>}</td>
                   <td style={{padding:"7px 12px",color:C.cinzaTexto}}>{w.total}</td>
                   {inds.map(ind=><td key={ind.key} style={{padding:"7px 12px",textAlign:"center"}}><Chip v={w[semFiltro?ind.spKey:ind.key]} m={ind.meta} inv={ind.inv} unit={ind.unit}/></td>)}
                   <td style={{padding:"7px 12px",textAlign:"center",color:w.prob>0?C.vermelho:C.verde,fontWeight:700}}>{w.prob}</td>
