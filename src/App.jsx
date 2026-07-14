@@ -472,7 +472,7 @@ export default function App() {
 
   const [csvStatus,   setCsvStatus]   = useState("idle"); // idle | processando | ok | erro
   const [csvNome,     setCsvNome]     = useState("");
-  const [csvResumo,   setCsvResumo]   = useState({novas:[],retroativas:[]});
+  const [csvResumo,   setCsvResumo]   = useState({novas:[],retroativas:[],variacoes:[]});
 
   const [abaGlobal,   setAbaGlobal]   = useState("geral");
   const [abaSub,      setAbaSub]      = useState("painel");
@@ -651,9 +651,10 @@ export default function App() {
           return merged;
         });
 
-        // Por parceiro
+        // Por parceiro — capturar snapshot anterior para calcular variações
+        let pdSnapshot = {};
         setPdExtra(prev=>{
-          // Manter dados anteriores; sobrescrever apenas semanas presentes no CSV
+          pdSnapshot = prev; // snapshot ANTES de atualizar
           const merged={...prev};
           parcsCSV.forEach(p=>{
             const rowsP=coletado.filter(r=>r["Transportadora"]===p);
@@ -662,12 +663,44 @@ export default function App() {
               if(rowsPS.length<3) return;
               const d=calcSemana(rowsPS); if(!d) return;
               if(!merged[p]) merged[p]={};
-              merged[p][s]=d; // atualiza só essa semana, mantém as demais
+              merged[p][s]=d;
             });
           });
           try{localStorage.setItem("slaParca_pd",JSON.stringify(merged));}catch{}
           return merged;
         });
+
+        // Calcular variações de volume nas semanas retroativas
+        const variacoes = retroativasW.map(w=>{
+          // Total anterior (do weeklyExtra snapshot — capturado dentro do setWeeklyExtra)
+          const semAnt = weeklyExtra.find(e=>e.s===w.s);
+          const totalAnt = semAnt?.total ?? null;
+          const totalNovo = w.total;
+          if(totalAnt===null||totalAnt===totalNovo) return null;
+
+          // Por parceiro
+          const porParceiro = parcsCSV.map(p=>{
+            const antes  = pdSnapshot[p]?.[w.s]?.total ?? null;
+            const depois = coletado.filter(r=>r["Transportadora"]===p&&parseInt(r["semana_Efetivada"])===w.s).length;
+            if(antes===null||antes===depois) return null;
+            return {parceiro:p, antes, depois, diff:depois-antes};
+          }).filter(Boolean);
+
+          return {semana:w.s, totalAnt, totalNovo, diff:totalNovo-totalAnt, porParceiro};
+        }).filter(Boolean);
+
+        if(variacoes.length>0){
+          setVariacaoVol(prev=>{
+            const entry={
+              data:new Date().toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}),
+              arquivo:file.name,
+              variacoes,
+            };
+            const updated=[...prev,entry];
+            try{localStorage.setItem("slaParca_var",JSON.stringify(updated));}catch{}
+            return updated;
+          });
+        }
 
         // Upload history
         setUploadHistory(prev=>{
@@ -683,7 +716,7 @@ export default function App() {
         setParceiros(parcsCSV);
 
         setCsvStatus("ok");
-        setCsvResumo({novas:novasW.map(w=>w.s),retroativas:retroativasW.map(w=>w.s)});
+        setCsvResumo({novas:novasW.map(w=>w.s),retroativas:retroativasW.map(w=>w.s),variacoes});
       }catch(e){console.error(e);setCsvStatus("erro");}
     };
     reader.readAsText(file);
@@ -733,11 +766,35 @@ export default function App() {
 
       {/* Status CSV */}
       {csvStatus==="processando"&&<span style={{fontSize:11,color:C.cinzaTexto}}>⏳ processando...</span>}
-      {csvStatus==="ok"&&<span style={{fontSize:11,background:C.verdeLight,color:C.verde,padding:"2px 10px",borderRadius:999,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-        ✓ {csvNome}
-        {csvResumo.novas.length>0&&<span>· +{csvResumo.novas.length} nova{csvResumo.novas.length>1?"s":""} (S{csvResumo.novas.join(", S")})</span>}
-        {csvResumo.retroativas.length>0&&<span style={{color:C.azul}}>· {csvResumo.retroativas.length} retroativa{csvResumo.retroativas.length>1?"s":""} (S{csvResumo.retroativas.join(", S")})</span>}
-      </span>}
+      {csvStatus==="ok"&&<div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <span style={{fontSize:11,background:C.verdeLight,color:C.verde,padding:"2px 10px",borderRadius:999,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          ✓ {csvNome}
+          {csvResumo.novas.length>0&&<span>· +{csvResumo.novas.length} nova{csvResumo.novas.length>1?"s":""} (S{csvResumo.novas.join(", S")})</span>}
+          {csvResumo.retroativas.length>0&&<span style={{color:C.azul}}>· {csvResumo.retroativas.length} retroativa{csvResumo.retroativas.length>1?"s":""} (S{csvResumo.retroativas.join(", S")})</span>}
+        </span>
+        {csvResumo.variacoes&&csvResumo.variacoes.length>0&&(
+          <div style={{position:"relative",display:"inline-block"}}>
+            <span style={{
+              fontSize:11,background:"#FFF7ED",color:C.laranja,padding:"4px 12px",
+              borderRadius:999,border:`1px solid ${C.laranjaLight}`,cursor:"pointer",
+              fontWeight:700,display:"flex",alignItems:"center",gap:5
+            }}
+              title="Clique para ver detalhes"
+              onClick={()=>setAbaGlobal("config")}
+            >
+              📊 {csvResumo.variacoes.reduce((a,v)=>a+Math.abs(v.diff),0)>0
+                ? `${csvResumo.variacoes.reduce((a,v)=>a+(v.diff>0?v.diff:0),0)>0?"+":""}${csvResumo.variacoes.reduce((a,v)=>a+v.diff,0)} coletas em ${csvResumo.variacoes.length} sem.`
+                : "variação detectada"
+              }
+              {csvResumo.variacoes.some(v=>v.porParceiro?.length>0)&&
+                <span style={{fontSize:10,color:C.cinzaTexto,fontWeight:400}}>
+                  ({csvResumo.variacoes.flatMap(v=>v.porParceiro||[]).length} parceiro{csvResumo.variacoes.flatMap(v=>v.porParceiro||[]).length>1?"s":""})
+                </span>
+              }
+            </span>
+          </div>
+        )}
+      </div>}
       {csvStatus==="erro"&&<span style={{fontSize:11,background:C.vermelhoLight,color:C.vermelho,padding:"2px 10px",borderRadius:999}}>❌ Erro ao processar CSV</span>}
 
       <div style={{flex:1}}/>
@@ -1221,19 +1278,42 @@ export default function App() {
           <div style={{display:"flex",flexDirection:"column"}}>
             {[...variacaoVol].reverse().map((entry,ei)=>(
               <div key={ei} style={{borderTop:ei>0?`1px solid ${C.cinzaBorda}`:"none"}}>
-                <div style={{padding:"8px 20px",background:C.cinzaFundo,display:"flex",gap:12,alignItems:"center"}}>
+                <div style={{padding:"10px 20px",background:C.cinzaFundo,display:"flex",gap:12,alignItems:"center"}}>
                   <span style={{fontSize:11,color:C.cinzaTexto}}>{entry.data}</span>
                   <span style={{fontSize:12,fontWeight:700}}>{entry.arquivo}</span>
+                  <span style={{fontSize:11,color:C.cinzaTexto}}>{entry.variacoes?.length||0} semana{(entry.variacoes?.length||0)!==1?"s":""} com variação</span>
                 </div>
                 {(entry.variacoes||[]).map((v,vi)=>{
-                  const cor=v.efetDiff>0?C.verde:C.vermelho;const bg=v.efetDiff>0?C.verdeLight:C.vermelhoLight;
-                  return <div key={vi} style={{padding:"10px 20px",borderTop:`1px solid ${C.cinzaBorda}`,display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
-                    <span style={{fontWeight:800,fontSize:14,minWidth:36}}>S{v.semana}</span>
-                    <div style={{display:"flex",alignItems:"center",gap:8,background:C.cinzaFundo,borderRadius:8,padding:"5px 12px"}}>
-                      <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:700}}>EFETIVADAS</span>
-                      <span style={{color:C.cinzaTexto}}>{v.efetAntes}→{v.efetDepois}</span>
-                      <span style={{fontWeight:800,color:cor,background:bg,padding:"1px 8px",borderRadius:5}}>{v.efetDiff>0?"+":""}{v.efetDiff}</span>
+                  const cor=v.diff>0?C.verde:C.vermelho;
+                  const bg=v.diff>0?C.verdeLight:C.vermelhoLight;
+                  return <div key={vi} style={{padding:"12px 20px",borderTop:`1px solid ${C.cinzaBorda}`}}>
+                    {/* Geral da semana */}
+                    <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",marginBottom:v.porParceiro?.length>0?10:0}}>
+                      <span style={{fontWeight:800,fontSize:15,minWidth:36,color:C.texto}}>S{v.semana}</span>
+                      <div style={{display:"flex",alignItems:"center",gap:8,background:C.cinzaFundo,borderRadius:8,padding:"6px 12px"}}>
+                        <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:700}}>EFETIVADAS</span>
+                        <span style={{color:C.cinzaTexto,fontSize:12}}>{v.totalAnt} → {v.totalNovo}</span>
+                        <span style={{fontWeight:800,color:cor,background:bg,padding:"2px 10px",borderRadius:5,fontSize:13}}>
+                          {v.diff>0?"+":""}{v.diff}
+                        </span>
+                      </div>
                     </div>
+                    {/* Por parceiro */}
+                    {v.porParceiro?.length>0&&<div style={{display:"flex",gap:8,flexWrap:"wrap",paddingLeft:52}}>
+                      {v.porParceiro.map((pp,ppi)=>{
+                        const cP=pp.diff>0?C.verde:C.vermelho;
+                        const bP=pp.diff>0?C.verdeLight:C.vermelhoLight;
+                        return <div key={ppi} style={{background:C.cinzaFundo,borderRadius:8,padding:"6px 12px",border:`1px solid ${C.cinzaBorda}`,minWidth:140}}>
+                          <div style={{fontSize:11,fontWeight:700,color:C.texto,marginBottom:3}}>{pp.parceiro.split(" ")[0]}</div>
+                          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                            <span style={{fontSize:11,color:C.cinzaTexto}}>{pp.antes} → {pp.depois}</span>
+                            <span style={{fontWeight:800,color:cP,background:bP,padding:"1px 7px",borderRadius:4,fontSize:12}}>
+                              {pp.diff>0?"+":""}{pp.diff}
+                            </span>
+                          </div>
+                        </div>;
+                      })}
+                    </div>}
                   </div>;
                 })}
               </div>
