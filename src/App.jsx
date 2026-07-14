@@ -461,6 +461,236 @@ const AbaAtrasos = ({rawRows, filtrarPorPeriodo, sel, lbl}) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// Componente AbaRelatorios
+// ══════════════════════════════════════════════════════════════════════════════
+const AbaRelatorios = ({rawRows,weeklyMerged,pdMerged,monthlyData,parceirosDisp,sel,lbl,granular,semFiltro,INDICADORES_R,PARC_CORES_R,FAIXAS_AGING_R,busdays_r,norm_r,pct_r}) => {
+  const [tipoRel,     setTipoRel]     = useState("atrasos");
+  const [parcSel,     setParcSel]     = useState([]);
+  const [semSel,      setSemSel]      = useState([]);
+  const [mesSel,      setMesSel]      = useState([]);
+  const [colsSel,     setColsSel]     = useState(INDICADORES_R.map(i=>i.key));
+  const [inclAtrasos, setInclAtrasos] = useState(true);
+  const [faixaSel,    setFaixaSel]    = useState(["5","10","15","20","25"]);
+
+  const todasSemanas = weeklyMerged.map(w=>w.s);
+  const todosMeses   = monthlyData.map(d=>d.m);
+  const MESES_N = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"};
+
+  useEffect(()=>{
+    if(parceirosDisp.length>0&&parcSel.length===0) setParcSel(parceirosDisp);
+    if(todasSemanas.length>0&&semSel.length===0)   setSemSel(todasSemanas.slice(-4));
+    if(todosMeses.length>0&&mesSel.length===0)     setMesSel(todosMeses);
+  },[parceirosDisp.join(","),todasSemanas.join(","),todosMeses.join(",")]);
+
+  const pill2=(on,cor=C.laranja)=>({padding:"4px 12px",borderRadius:999,border:`1.5px solid ${on?cor:C.cinzaBorda}`,background:on?`${cor}18`:"transparent",cursor:"pointer",fontSize:12,fontWeight:600,color:on?cor:C.cinzaTexto});
+  const sm2=(on,cor=C.laranja)=>({...pill2(on,cor),padding:"3px 8px",fontSize:11});
+  const escCSV=v=>{const s=String(v??"");return s.includes(";")||s.includes('"')?`"${s.replace(/"/g,'""')}"`:s;};
+  const dlCSV=(rows2,nome)=>{const csv=rows2.map(r=>r.map(escCSV).join(";")).join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));a.download=`${nome}_${new Date().toISOString().slice(0,10)}.csv`;a.click();};
+
+  const getAtrasos = (parceiros2) => {
+    if(!rawRows.length) return [];
+    return rawRows.filter(r=>
+      r["Flag Situacao Coleta"]==="Coletado" &&
+      norm_r(r["Vencido"])==="Sim" &&
+      r["Data Coleta Efetivada Date"] && r["Data Coleta Efetivada Date"]!=="--" &&
+      (parceiros2.length===0||parceiros2.includes(r["Transportadora"])) &&
+      (semSel.length===0||semSel.includes(parseInt(r["semana_Efetivada"])))
+    ).map(r=>{const d=busdays_r(r["Data Solicitacao Date"],r["Data Coleta Efetivada Date"]);return d!=null&&d>=0?{...r,diasAtraso:d}:null;})
+    .filter(Boolean).sort((a,b)=>b.diasAtraso-a.diasAtraso);
+  };
+
+  const faixaLbl=dias=>dias>=25?"≥ 25d":dias>=20?"≥ 20d":dias>=15?"≥ 15d":dias>=10?"≥ 10d":"≥ 5d";
+  const faixaCls=dias=>dias>=25?"f25":dias>=20?"f20":dias>=15?"f15":dias>=10?"f10":"f5";
+  const chipCls=(v,meta,inv)=>{if(v==null)return"";if(!inv)return v>=meta?"verde":v>=meta*0.95?"amarelo":"vermelho";return v<=meta?"verde":v<=meta*1.15?"amarelo":"vermelho";};
+  const fmt=(v,i)=>v==null?"—":i.inv?`${Math.round(v)}${i.unit}`:`${v.toFixed(1)}${i.unit}`;
+
+  const CSS_BASE = `body{font-family:Arial,sans-serif;padding:24px;color:#1C1917}h1{color:#F97316;font-size:22px;margin-bottom:4px}h2{font-size:13px;color:#6B7280;margin-bottom:20px;font-weight:400}table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px}th{background:#F8F7F4;padding:7px 10px;font-size:10px;text-transform:uppercase;color:#6B7280;border-bottom:2px solid #E5E3DF;text-align:center}th:first-child{text-align:left}td{padding:6px 10px;border-bottom:1px solid #E5E3DF;text-align:center}td:first-child{text-align:left}tr:nth-child(even){background:#F8F7F4}.chip{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px}.verde{background:#BBF7D0;color:#16A34A}.vermelho{background:#FEE2E2;color:#DC2626}.amarelo{background:#FEF08A;color:#CA8A04}.f5{background:#FEF08A;color:#CA8A04}.f10{background:#FFF7ED;color:#F97316}.f15{background:#EDE9FE;color:#7C3AED}.f20{background:#FEE2E2;color:#DC2626}.f25{background:#FEE2E2;color:#7F1D1D}.prob{background:#FEE2E2;color:#DC2626;padding:1px 8px;border-radius:4px;font-size:10px;font-weight:700}.section-title{font-size:13px;font-weight:700;color:#6B7280;text-transform:uppercase;letter-spacing:.5px;margin:20px 0 8px;border-bottom:1px solid #E5E3DF;padding-bottom:5px}@media print{@page{margin:14mm}}`;
+
+  const openPrint = html => { const w=window.open("","_blank"); w.document.write(html); w.document.close(); };
+
+  const gerarAtrasos = (fmt2) => {
+    const base = getAtrasos(parcSel);
+    const ativos = faixaSel.map(Number);
+    const filtrado = base.filter(r=>ativos.some(f=>r.diasAtraso>=f));
+    if(fmt2==="csv"){
+      dlCSV([["Pedido","Parceiro","Cidade","UF","Semana","Dias Úteis","Classificação","Data Solicitação","Data Coleta","Problema"],
+        ...filtrado.map(r=>[r["Pv"]||"",r["Transportadora"]||"",r["Cidade"]||"",r["Estado"]||"",`S${r["semana_Efetivada"]}`,r.diasAtraso,faixaLbl(r.diasAtraso),r["Data Solicitacao Date"]||"",r["Data Coleta Efetivada Date"]||"",r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1?"Sim":"Não"])
+      ],"relatorio_atrasos");
+    } else {
+      openPrint(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Atrasos</title><style>${CSS_BASE}</style></head><body>
+        <h1>⏰ Relatório de Atrasos — Parça</h1>
+        <h2>Parceiros: ${parcSel.join(", ")} · Semanas: S${semSel.join(", S")} · ${new Date().toLocaleDateString("pt-BR")}</h2>
+        <table><thead><tr><th>Pedido</th><th>Parceiro</th><th>Cidade</th><th>UF</th><th>Semana</th><th>Dias úteis</th><th>Classificação</th><th>Solicitação</th><th>Coleta</th><th>Prob.</th></tr></thead>
+        <tbody>${filtrado.map(r=>`<tr><td style="font-family:monospace;font-size:11px">${r["Pv"]||""}</td><td>${(r["Transportadora"]||"").split(" ")[0]}</td><td>${r["Cidade"]||""}</td><td>${r["Estado"]||""}</td><td>S${r["semana_Efetivada"]}</td><td style="font-weight:800">${r.diasAtraso}d</td><td><span class="chip ${faixaCls(r.diasAtraso)}">${faixaLbl(r.diasAtraso)}</span></td><td>${r["Data Solicitacao Date"]||""}</td><td>${r["Data Coleta Efetivada Date"]||""}</td><td>${r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1?'<span class="prob">⚠️ Sim</span>':"—"}</td></tr>`).join("")}</tbody>
+        </table><script>window.print();window.close();</script></body></html>`);
+    }
+  };
+
+  const gerarPainel = (fmt2) => {
+    const inds = INDICADORES_R.filter(i=>colsSel.includes(i.key));
+    const dados = parcSel.map(p=>({
+      p, rows2: semSel.map(s=>{const d=pdMerged[p]?.[s];return d?{s,...d}:null;}).filter(Boolean)
+    }));
+    if(fmt2==="csv"){
+      dlCSV([["Parceiro","Semana","Coletas",...inds.map(i=>i.label),"Problemas"],
+        ...dados.flatMap(({p,rows2})=>rows2.map(r=>[p,`S${r.s}`,r.total,...inds.map(i=>{const v=r[semFiltro?i.spKey:i.key];return v!=null?`${v.toFixed(1)}${i.unit}`:"—";}),r.prob||0]))
+      ],"relatorio_indicadores");
+    } else {
+      openPrint(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Indicadores</title><style>${CSS_BASE}.parc{margin-bottom:28px;page-break-inside:avoid}.ptitle{font-size:16px;font-weight:800;color:#F97316;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #FED7AA}</style></head><body>
+        <h1>📊 Indicadores por Parceiro — Parça</h1>
+        <h2>Semanas: S${semSel.join(", S")} · ${new Date().toLocaleDateString("pt-BR")}</h2>
+        ${dados.map(({p,rows2})=>`<div class="parc"><div class="ptitle">${p}</div>
+          ${rows2.length===0?'<p style="color:#6B7280;font-style:italic">Sem dados.</p>':`
+          <table><thead><tr><th>Semana</th><th>Coletas</th>${inds.map(i=>`<th>${i.label}</th>`).join("")}<th>Prob.</th></tr></thead>
+          <tbody>${rows2.map(r=>`<tr><td style="font-weight:600">S${r.s}</td><td>${r.total}</td>
+            ${inds.map(i=>{const v=r[semFiltro?i.spKey:i.key];if(v==null)return'<td>—</td>';const cls=chipCls(v,i.meta,i.inv);const fmtv=i.inv?`${Math.round(v)}${i.unit}`:`${v.toFixed(1)}${i.unit}`;return`<td><span class="chip ${cls}">${fmtv}</span></td>`;}).join("")}
+            <td style="font-weight:700;color:${(r.prob||0)>0?'#DC2626':'#16A34A'}">${r.prob||0}</td>
+          </tr>`).join("")}</tbody></table>`}
+        </div>`).join("")}
+        <script>window.print();window.close();</script></body></html>`);
+    }
+  };
+
+  const gerarParceiro = () => {
+    const inds = INDICADORES_R.filter(i=>colsSel.includes(i.key));
+    openPrint(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Parceiro</title><style>
+      ${CSS_BASE}
+      .capa{padding:36px;background:#F97316;color:white;margin-bottom:0}
+      .capa h1{font-size:26px;margin:0 0 6px}.capa h2{font-size:13px;font-weight:400;opacity:.85;margin:0}
+      .parc-sec{padding:28px 32px;border-bottom:3px solid #FED7AA;page-break-before:always}
+      .ptitle{font-size:22px;font-weight:800;color:#F97316;margin-bottom:16px}
+    </style></head><body>
+      <div class="capa"><h1>📊 Relatório de Desempenho — Parça</h1><h2>${new Date().toLocaleDateString("pt-BR")} · S${semSel.join(", S")}</h2></div>
+      ${parcSel.map(p=>{
+        const rowsSem = semSel.map(s=>{const d=pdMerged[p]?.[s];return d?{s,...d}:null;}).filter(Boolean);
+        const rowsMes = mesSel.map(m=>{
+          if(!rawRows.length) return null;
+          const rs=rawRows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&r["Transportadora"]===p&&parseInt(r["Mês_Efetivada"])===m);
+          if(rs.length<3) return null;
+          const isNao=r=>norm_r(r["Vencido"])==="Nao";
+          const isAg=r=>r["Agendamento"]==="1"||r["Agendamento"]===1;
+          const agOk=rs.filter(isAg);
+          const isAder=r=>{const v=r["Aderencia agendamento "]??r["Aderencia agendamento"];return v==="1"||v===1;};
+          const ag=rs.map(r=>{const d=busdays_r(r["Data Solicitacao Date"],r["Data Coleta Efetivada Date"]);return d;}).filter(v=>v!=null);
+          return {m,periodo:MESES_N[m],total:rs.length,
+            sla:pct_r(rs.filter(isNao).length,rs.length),agend:pct_r(rs.filter(isAg).length,rs.length),
+            ader:pct_r(agOk.filter(isAder).length,agOk.length),aging:ag.length?Math.round(ag.reduce((a,b)=>a+b,0)/ag.length*100)/100:null,
+            prob:rs.filter(r=>r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1).length};
+        }).filter(Boolean);
+        const atr = inclAtrasos ? getAtrasos([p]) : [];
+        const tblHeader = `<thead><tr><th>Período</th><th>Coletas</th>${inds.map(i=>`<th>${i.label}</th>`).join("")}<th>Prob.</th></tr></thead>`;
+        const tblRow = r => `<tr><td style="font-weight:600">${r.periodo||`S${r.s}`}</td><td>${r.total}</td>${inds.map(i=>{const v=r[i.key];if(v==null)return'<td>—</td>';const cls=chipCls(v,i.meta,i.inv);const fv=i.inv?`${Math.round(v)}${i.unit}`:`${v.toFixed(1)}${i.unit}`;return`<td><span class="chip ${cls}">${fv}</span></td>`;}).join("")}<td style="font-weight:700;color:${(r.prob||0)>0?'#DC2626':'#16A34A'}">${r.prob||0}</td></tr>`;
+        return `<div class="parc-sec">
+          <div class="ptitle">${p}</div>
+          <div class="section-title">📈 Por Semana</div>
+          ${rowsSem.length?`<table>${tblHeader}<tbody>${rowsSem.map(tblRow).join("")}</tbody></table>`:'<p style="color:#6B7280;font-style:italic">Sem dados semanais.</p>'}
+          <div class="section-title">📅 Por Mês</div>
+          ${rowsMes.length?`<table>${tblHeader}<tbody>${rowsMes.map(tblRow).join("")}</tbody></table>`:'<p style="color:#6B7280;font-style:italic">Sem dados mensais.</p>'}
+          ${inclAtrasos?`<div class="section-title">⏰ Atrasos (Vencido = Sim)</div>
+          ${atr.length===0?'<p style="color:#16A34A;font-style:italic">✓ Nenhuma coleta em atraso.</p>':`
+          <table><thead><tr><th>Pedido</th><th>Cidade</th><th>UF</th><th>Semana</th><th>Dias úteis</th><th>Classificação</th><th>Solicitação</th><th>Coleta</th></tr></thead>
+          <tbody>${atr.map(r=>`<tr><td style="font-family:monospace;font-size:11px">${r["Pv"]||""}</td><td>${r["Cidade"]||""}</td><td>${r["Estado"]||""}</td><td>S${r["semana_Efetivada"]}</td><td style="font-weight:800">${r.diasAtraso}d</td><td><span class="chip ${faixaCls(r.diasAtraso)}">${faixaLbl(r.diasAtraso)}</span></td><td>${r["Data Solicitacao Date"]||""}</td><td>${r["Data Coleta Efetivada Date"]||""}</td></tr>`).join("")}</tbody>
+          </table>`}`:''}
+        </div>`;
+      }).join("")}
+      <script>window.print();window.close();</script></body></html>`);
+  };
+
+  const sec=(t)=><div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3,marginBottom:8,marginTop:14}}>{t}</div>;
+  const parcChips=()=><>
+    <div style={{display:"flex",gap:6,marginBottom:6}}>
+      <button onClick={()=>setParcSel(parceirosDisp)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todos</button>
+      <button onClick={()=>setParcSel([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhum</button>
+    </div>
+    <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
+      {parceirosDisp.map((p,i)=><button key={p} onClick={()=>setParcSel(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p])} style={sm2(parcSel.includes(p),PARC_CORES_R[i%PARC_CORES_R.length])}>{p.split(" ")[0]}</button>)}
+    </div></>;
+  const semChips=()=><>
+    <div style={{display:"flex",gap:6,marginBottom:6}}>
+      <button onClick={()=>setSemSel(todasSemanas)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todas</button>
+      <button onClick={()=>setSemSel([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhuma</button>
+    </div>
+    <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:14}}>
+      {todasSemanas.map(s=><button key={s} onClick={()=>setSemSel(prev=>prev.includes(s)?prev.filter(x=>x!==s):[...prev,s])} style={sm2(semSel.includes(s))}>S{s}</button>)}
+    </div></>;
+
+  return <div style={{display:"flex",flexDirection:"column",gap:14}}>
+    {/* Seletor tipo */}
+    <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:16}}>
+      <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:10}}>Tipo de Relatório</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {[["atrasos","⏰ Atrasos","Pedidos coletados fora do SLA"],
+          ["painel","📊 Indicadores por Parceiro","SLA, Agendamento, Aderência, Aging por semana"],
+          ["parceiro","🤝 Visão por Parceiro","Para apresentar ao parceiro — semana + mês + atrasos"]
+        ].map(([k,l,d])=>(
+          <button key={k} onClick={()=>setTipoRel(k)} style={{...pill2(tipoRel===k),borderRadius:10,padding:"8px 16px",textAlign:"left",display:"flex",flexDirection:"column",gap:2,minWidth:200}}>
+            <span style={{fontWeight:700,fontSize:13}}>{l}</span>
+            <span style={{fontSize:11,fontWeight:400,color:tipoRel===k?C.laranja:C.cinzaTexto}}>{d}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+
+    {/* Config Atrasos */}
+    {tipoRel==="atrasos"&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"16px 20px"}}>
+      {sec("Parceiros")}{parcChips()}
+      {sec("Semanas")}{semChips()}
+      {sec("Faixas de aging")}
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+        {[["5","≥ 5d",C.amarelo],["10","≥ 10d",C.laranja],["15","≥ 15d",C.roxo],["20","≥ 20d",C.vermelho],["25","≥ 25d","#7F1D1D"]].map(([v,l,c])=>(
+          <button key={v} onClick={()=>setFaixaSel(prev=>prev.includes(v)?prev.filter(x=>x!==v):[...prev,v])} style={sm2(faixaSel.includes(v),c)}>{l}</button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <button onClick={()=>gerarAtrasos("csv")} style={{...pill2(true),display:"flex",alignItems:"center",gap:6}}>📥 Exportar CSV</button>
+        <button onClick={()=>gerarAtrasos("pdf")} style={{...pill2(false,C.azul),color:C.azul,display:"flex",alignItems:"center",gap:6}}>🖨️ Imprimir / PDF</button>
+      </div>
+    </div>}
+
+    {/* Config Painel */}
+    {tipoRel==="painel"&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"16px 20px"}}>
+      {sec("Parceiros")}{parcChips()}
+      {sec("Semanas")}{semChips()}
+      {sec("Indicadores")}
+      <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:16}}>
+        {INDICADORES_R.map(i=><button key={i.key} onClick={()=>setColsSel(prev=>prev.includes(i.key)?prev.filter(x=>x!==i.key):[...prev,i.key])} style={sm2(colsSel.includes(i.key))}>{i.label}</button>)}
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <button onClick={()=>gerarPainel("csv")} style={{...pill2(true),display:"flex",alignItems:"center",gap:6}}>📥 Exportar CSV</button>
+        <button onClick={()=>gerarPainel("pdf")} style={{...pill2(false,C.azul),color:C.azul,display:"flex",alignItems:"center",gap:6}}>🖨️ Imprimir / PDF</button>
+      </div>
+    </div>}
+
+    {/* Config Parceiro */}
+    {tipoRel==="parceiro"&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"16px 20px"}}>
+      {sec("Parceiros (um relatório por parceiro)")}{parcChips()}
+      {sec("Semanas")}{semChips()}
+      {sec("Meses")}
+      <div style={{display:"flex",gap:6,marginBottom:6}}>
+        <button onClick={()=>setMesSel(todosMeses)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todos</button>
+        <button onClick={()=>setMesSel([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhum</button>
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:14}}>
+        {todosMeses.map(m=><button key={m} onClick={()=>setMesSel(prev=>prev.includes(m)?prev.filter(x=>x!==m):[...prev,m])} style={sm2(mesSel.includes(m))}>{MESES_N[m]}</button>)}
+      </div>
+      {sec("Indicadores")}
+      <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
+        {INDICADORES_R.map(i=><button key={i.key} onClick={()=>setColsSel(prev=>prev.includes(i.key)?prev.filter(x=>x!==i.key):[...prev,i.key])} style={sm2(colsSel.includes(i.key))}>{i.label}</button>)}
+      </div>
+      {sec("Incluir")}
+      <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:13,marginBottom:16}}>
+        <input type="checkbox" checked={inclAtrasos} onChange={e=>setInclAtrasos(e.target.checked)} style={{accentColor:C.laranja}}/>
+        Coletas em atraso (Vencido = Sim)
+      </label>
+      <button onClick={gerarParceiro} style={{background:C.azul,color:"white",border:"none",borderRadius:8,padding:"9px 20px",fontSize:13,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+        🖨️ Gerar PDF para apresentação
+      </button>
+      <div style={{fontSize:11,color:C.cinzaTexto,marginTop:8}}>Uma seção por parceiro · Abre janela de impressão do navegador</div>
+    </div>}
+  </div>;
+};
+
 export default function App() {
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -819,7 +1049,7 @@ export default function App() {
 
     {/* ── ABAS PRINCIPAIS ── */}
     <div style={{background:"white",borderBottom:`1px solid ${C.cinzaBorda}`,padding:"0 24px",display:"flex",gap:4,overflowX:"auto"}}>
-      {[["geral","🏠 Visão Geral"],["parceiros","🔍 Por Parceiro"],["atrasos","⏰ Atrasos"],["problemas_tab","⚠️ Problemas"],["simulacao","📈 Simulação"],["config","⚙️ Configurações"]].map(([k,l])=>(
+      {[["geral","🏠 Visão Geral"],["parceiros","🔍 Por Parceiro"],["atrasos","⏰ Atrasos"],["problemas_tab","⚠️ Problemas"],["relatorios","📋 Relatórios"],["simulacao","📈 Simulação"],["config","⚙️ Configurações"]].map(([k,l])=>(
         <button key={k} onClick={()=>setAbaGlobal(k)} style={{...hdr(l,abaGlobal===k),borderRadius:0,borderBottom:abaGlobal===k?`2px solid ${C.laranja}`:"2px solid transparent",padding:"12px 16px"}}>{l}</button>
       ))}
     </div>
@@ -1202,6 +1432,22 @@ export default function App() {
           </div>
         :<AbaProblemas rawRows={rawRows} filtrarPorPeriodo={filtrarPorPeriodo} sel={sel} lbl={lbl}/>
       )}
+      {/* ══ RELATÓRIOS ══ */}
+      {abaGlobal==="relatorios"&&<AbaRelatorios
+        rawRows={rawRows}
+        weeklyMerged={WEEKLY_MERGED}
+        pdMerged={PD_MERGED}
+        monthlyData={monthlyData}
+        parceirosDisp={PARCEIROS}
+        sel={sel} lbl={lbl} granular={granular} semFiltro={semFiltro}
+        INDICADORES_R={INDICADORES}
+        PARC_CORES_R={PARC_CORES}
+        FAIXAS_AGING_R={FAIXAS_AGING}
+        busdays_r={busdays}
+        norm_r={norm}
+        pct_r={pct}
+      />}
+
       {/* ══ SIMULAÇÃO ══ */}
       {abaGlobal==="simulacao"&&(()=>{
         const TAXA=11.24, GMV_MED=201.6, BASE_REV=2320;
