@@ -726,6 +726,166 @@ const AbaRelatorios = ({rawRows,weeklyMerged,pdMerged,monthlyData,parceirosDisp,
   </div>;
 };
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Componente AbaCompararCSVs
+// ══════════════════════════════════════════════════════════════════════════════
+const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
+  const [csv1Rows, setCsv1Rows] = useState([]);
+  const [csv2Rows, setCsv2Rows] = useState([]);
+  const [csv1Nome, setCsv1Nome] = useState("");
+  const [csv2Nome, setCsv2Nome] = useState("");
+  const [loading,  setLoading]  = useState("");
+
+  const carregarCSV = (file, setCsv, setNome) => {
+    setLoading(file.name);
+    const reader = new FileReader();
+    reader.onload = ev => { setCsv(parseCSVFn(ev.target.result)); setNome(file.name); setLoading(""); };
+    reader.readAsText(file);
+  };
+
+  const diff = useMemo(() => {
+    if(!csv1Rows.length || !csv2Rows.length) return null;
+    const col1 = new Map(csv1Rows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&r["Pv"]).map(r=>[r["Pv"],r]));
+    const col2 = csv2Rows.filter(r=>r["Flag Situacao Coleta"]==="Coletado"&&r["Pv"]);
+    const novos = col2.filter(r=>!col1.has(r["Pv"])).map(r=>({...r,diasAging:busdays_r(r["Data Solicitacao Date"],r["Data Coleta Efetivada Date"])}));
+    const crossMap = {};
+    novos.forEach(r=>{
+      const sol=parseInt(r["semana_solicitação"]),efe=parseInt(r["semana_Efetivada"]);
+      if(isNaN(sol)||isNaN(efe)) return;
+      const key=`S${sol}→S${efe}`;
+      if(!crossMap[key]) crossMap[key]={sol,efe,rows:[]};
+      crossMap[key].rows.push(r);
+    });
+    const porParceiro={};
+    novos.forEach(r=>{const p=r["Transportadora"]||"—";if(!porParceiro[p])porParceiro[p]={total:0,vencido:0};porParceiro[p].total++;if(norm_r(r["Vencido"])==="Sim")porParceiro[p].vencido++;});
+    return {novos, crossMap, porParceiro, totalCSV1:col1.size, totalCSV2:col2.length};
+  },[csv1Rows,csv2Rows]);
+
+  const pill2=(on,cor=C.laranja)=>({padding:"4px 12px",borderRadius:999,border:`1.5px solid ${on?cor:C.cinzaBorda}`,background:on?`${cor}18`:"transparent",cursor:"pointer",fontSize:12,fontWeight:600,color:on?cor:C.cinzaTexto});
+  const escCSV=v=>{const s=String(v??"");return s.includes(";")||s.includes('"')?`"${s.replace(/"/g,'""')}"`:s;};
+  const dlCSV=(rows2,nome)=>{const csv=rows2.map(r=>r.map(escCSV).join(";")).join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));a.download=`${nome}_${new Date().toISOString().slice(0,10)}.csv`;a.click();};
+  const faixaCor=d=>d>=25?"#7F1D1D":d>=20?C.vermelho:d>=15?C.roxo:d>=10?C.laranja:d>=5?C.amarelo:C.verde;
+  const faixaBg =d=>d>=25?"#FEE2E2":d>=20?C.vermelhoLight:d>=15?C.roxoLight:d>=10?"#FFF7ED":d>=5?C.amareloLight:C.verdeLight;
+
+  return <div style={{display:"flex",flexDirection:"column",gap:14}}>
+    {/* Upload */}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      {[["📁 CSV Anterior",csv1Nome,csv1Rows,f=>carregarCSV(f,setCsv1Rows,setCsv1Nome)],
+        ["📁 CSV Novo",csv2Nome,csv2Rows,f=>carregarCSV(f,setCsv2Rows,setCsv2Nome)]
+      ].map(([titulo,nome,rows,fn],i)=>(
+        <div key={i} style={{background:C.cinzaCard,border:`2px dashed ${nome?C.verde:C.cinzaBorda}`,borderRadius:12,padding:20,textAlign:"center"}}>
+          <div style={{fontSize:13,fontWeight:700,color:C.cinzaTexto,marginBottom:12}}>{titulo}</div>
+          {nome?<div>
+            <div style={{fontSize:18,marginBottom:4}}>✅</div>
+            <div style={{fontWeight:700,fontSize:13,color:C.verde,marginBottom:4}}>{nome}</div>
+            <div style={{fontSize:11,color:C.cinzaTexto,marginBottom:8}}>{rows.filter(r=>r["Flag Situacao Coleta"]==="Coletado").length} coletas</div>
+            <label style={{...pill2(false),cursor:"pointer",fontSize:11}}>
+              <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>{if(e.target.files[0])fn(e.target.files[0]);e.target.value="";}}/>Trocar
+            </label>
+          </div>:<label style={{cursor:"pointer"}}>
+            <input type="file" accept=".csv" style={{display:"none"}} onChange={e=>{if(e.target.files[0])fn(e.target.files[0]);e.target.value="";}}/>
+            <div style={{fontSize:28,marginBottom:6}}>📂</div>
+            <div style={{fontSize:12,color:C.cinzaTexto}}>Clique para carregar</div>
+          </label>}
+        </div>
+      ))}
+    </div>
+
+    {loading&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:16,textAlign:"center",color:C.cinzaTexto}}>⏳ Processando {loading}...</div>}
+
+    {!diff&&!loading&&<div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:32,textAlign:"center",color:C.cinzaTexto}}>
+      <div style={{fontSize:28,marginBottom:8}}>🔄</div>
+      <div style={{fontWeight:700,fontSize:15,color:C.texto,marginBottom:6}}>Comparar dois CSVs</div>
+      <div style={{fontSize:13}}>Carregue o CSV anterior e o novo. O dashboard mostra os pedidos que apareceram como coletados no novo arquivo mas não estavam no anterior.</div>
+    </div>}
+
+    {diff&&<>
+      {/* KPIs */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+        {[{l:"Coletados no anterior",v:diff.totalCSV1,c:C.cinzaTexto},{l:"Coletados no novo",v:diff.totalCSV2,c:C.azul},{l:"Novos coletados",v:diff.novos.length,c:C.verde},{l:"Novos fora do SLA",v:diff.novos.filter(r=>norm_r(r["Vencido"])==="Sim").length,c:C.vermelho}].map(({l,v,c},i)=>(
+          <div key={i} style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,padding:"14px 18px",borderLeft:`4px solid ${c}`}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",marginBottom:4}}>{l}</div>
+            <div style={{fontSize:28,fontWeight:800,color:c,lineHeight:1}}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Cross semana */}
+      <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>
+          🔄 De qual semana vieram os novos coletados?
+          <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:400,marginLeft:8}}>Semana de solicitação → semana de efetivação</span>
+        </div>
+        <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead><tr style={{background:C.cinzaFundo}}>{["Solicitado em","Efetivado em","Coletas","Fora do SLA","SLA %"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:h==="Coletas"||h.includes("SLA")||h.includes("Fora")?"center":"left",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+          <tbody>{Object.values(diff.crossMap).sort((a,b)=>a.sol!==b.sol?a.sol-b.sol:a.efe-b.efe).map(({sol,efe,rows},i)=>{
+            const venc=rows.filter(r=>norm_r(r["Vencido"])==="Sim").length;
+            const sla=Math.round((1-venc/rows.length)*100);
+            const cor=sla>=86?C.verde:sla>=80?C.amarelo:C.vermelho;
+            const bg=sla>=86?C.verdeLight:sla>=80?C.amareloLight:C.vermelhoLight;
+            return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+              <td style={{padding:"8px 12px",fontWeight:700}}>S{sol}</td>
+              <td style={{padding:"8px 12px",color:C.azul,fontWeight:700}}>S{efe}</td>
+              <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700}}>{rows.length}</td>
+              <td style={{padding:"8px 12px",textAlign:"center",color:venc>0?C.vermelho:C.cinzaTexto,fontWeight:venc>0?700:400}}>{venc}</td>
+              <td style={{padding:"8px 12px",textAlign:"center"}}><span style={{fontWeight:700,color:cor,background:bg,padding:"2px 8px",borderRadius:6}}>{sla}%</span></td>
+            </tr>;
+          })}</tbody>
+        </table></div>
+      </div>
+
+      {/* Por parceiro */}
+      <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>Por Parceiro — Novos Coletados</div>
+        <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead><tr style={{background:C.cinzaFundo}}>{["Parceiro","Novos","Fora do SLA","SLA %"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:h==="Parceiro"?"left":"center",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase"}}>{h}</th>)}</tr></thead>
+          <tbody>{Object.entries(diff.porParceiro).sort((a,b)=>b[1].total-a[1].total).map(([p,v],i)=>{
+            const sla=Math.round((1-v.vencido/v.total)*100);
+            const cor=sla>=86?C.verde:sla>=80?C.amarelo:C.vermelho;
+            const bg=sla>=86?C.verdeLight:sla>=80?C.amareloLight:C.vermelhoLight;
+            return <tr key={p} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+              <td style={{padding:"8px 12px",fontWeight:600,color:PARC_CORES_R[i%PARC_CORES_R.length]}}>{p}</td>
+              <td style={{padding:"8px 12px",textAlign:"center",fontWeight:700}}>{v.total}</td>
+              <td style={{padding:"8px 12px",textAlign:"center",color:v.vencido>0?C.vermelho:C.cinzaTexto,fontWeight:v.vencido>0?700:400}}>{v.vencido}</td>
+              <td style={{padding:"8px 12px",textAlign:"center"}}><span style={{fontWeight:700,color:cor,background:bg,padding:"2px 8px",borderRadius:6}}>{sla}%</span></td>
+            </tr>;
+          })}</tbody>
+        </table></div>
+      </div>
+
+      {/* Detalhe pedidos */}
+      <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontWeight:700,fontSize:13}}>Pedidos Novos — Detalhe ({diff.novos.length})</span>
+          <button onClick={()=>dlCSV([["Pedido","Parceiro","Cidade","UF","Sem. Sol.","Sem. Efet.","Aging (d.u.)","SLA","Data Solicitação","Data Coleta"],...diff.novos.map(r=>[r["Pv"]||"",r["Transportadora"]||"",r["Cidade"]||"",r["Estado"]||"",`S${r["semana_solicitação"]}`,`S${r["semana_Efetivada"]}`,r.diasAging??"",norm_r(r["Vencido"])==="Sim"?"Vencido":"OK",r["Data Solicitacao Date"]||"",r["Data Coleta Efetivada Date"]||""])],"novos_coletados")} style={{...pill2(false,C.azul),color:C.azul,fontSize:11}}>📥 CSV</button>
+        </div>
+        <div style={{overflowX:"auto",maxHeight:440,overflowY:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead style={{position:"sticky",top:0,zIndex:1}}><tr style={{background:C.cinzaFundo}}>
+              {["Pedido","Parceiro","Cidade","UF","Sol.","Efet.","Aging","SLA","Solicitação","Coleta"].map(h=><th key={h} style={{padding:"7px 12px",textAlign:["Aging"].includes(h)?"center":"left",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}
+            </tr></thead>
+            <tbody>{[...diff.novos].sort((a,b)=>(b.diasAging??0)-(a.diasAging??0)).map((r,i)=>{
+              const dias=r.diasAging??0; const venc=norm_r(r["Vencido"])==="Sim";
+              return <tr key={i} style={{borderTop:`1px solid ${C.cinzaBorda}`,background:i%2===0?"transparent":C.cinzaFundo}}>
+                <td style={{padding:"6px 12px",fontWeight:600,fontFamily:"monospace",fontSize:11}}>{r["Pv"]||"—"}</td>
+                <td style={{padding:"6px 12px",fontSize:11}}>{(r["Transportadora"]||"").split(" ")[0]}</td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Cidade"]||"—"}</td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Estado"]||"—"}</td>
+                <td style={{padding:"6px 12px",fontSize:11,fontWeight:600}}>S{r["semana_solicitação"]}</td>
+                <td style={{padding:"6px 12px",fontSize:11,color:C.azul,fontWeight:600}}>S{r["semana_Efetivada"]}</td>
+                <td style={{padding:"6px 12px",textAlign:"center"}}>{dias>0?<span style={{fontWeight:700,color:faixaCor(dias),background:faixaBg(dias),padding:"1px 7px",borderRadius:5,fontSize:11}}>{dias}d</span>:<span style={{color:C.cinzaTexto}}>—</span>}</td>
+                <td style={{padding:"6px 12px",fontSize:11}}>{venc?<span style={{background:C.vermelhoLight,color:C.vermelho,padding:"1px 7px",borderRadius:4,fontWeight:700,fontSize:10}}>Vencido</span>:<span style={{background:C.verdeLight,color:C.verde,padding:"1px 7px",borderRadius:4,fontWeight:700,fontSize:10}}>OK</span>}</td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Data Solicitacao Date"]||"—"}</td>
+                <td style={{padding:"6px 12px",color:C.cinzaTexto,fontSize:11}}>{r["Data Coleta Efetivada Date"]||"—"}</td>
+              </tr>;
+            })}</tbody>
+          </table>
+        </div>
+      </div>
+    </>}
+  </div>;
+};
+
 export default function App() {
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -1084,7 +1244,7 @@ export default function App() {
 
     {/* ── ABAS PRINCIPAIS ── */}
     <div style={{background:"white",borderBottom:`1px solid ${C.cinzaBorda}`,padding:"0 24px",display:"flex",gap:4,overflowX:"auto"}}>
-      {[["geral","🏠 Visão Geral"],["parceiros","🔍 Por Parceiro"],["atrasos","⏰ Atrasos"],["problemas_tab","⚠️ Problemas"],["relatorios","📋 Relatórios"],["simulacao","📈 Simulação"],["config","⚙️ Configurações"]].map(([k,l])=>(
+      {[["geral","🏠 Visão Geral"],["parceiros","🔍 Por Parceiro"],["atrasos","⏰ Atrasos"],["problemas_tab","⚠️ Problemas"],["relatorios","📋 Relatórios"],["comparar","🔄 Comparar CSVs"],["simulacao","📈 Simulação"],["config","⚙️ Configurações"]].map(([k,l])=>(
         <button key={k} onClick={()=>setAbaGlobal(k)} style={{...hdr(l,abaGlobal===k),borderRadius:0,borderBottom:abaGlobal===k?`2px solid ${C.laranja}`:"2px solid transparent",padding:"12px 16px"}}>{l}</button>
       ))}
     </div>
@@ -1468,6 +1628,14 @@ export default function App() {
         :<AbaProblemas rawRows={rawRows} filtrarPorPeriodo={filtrarPorPeriodo} sel={sel} lbl={lbl}/>
       )}
       {/* ══ RELATÓRIOS ══ */}
+      {abaGlobal==="comparar"&&<AbaCompararCSVs
+        parseCSVFn={parseCSV}
+        busdays_r={busdays}
+        norm_r={norm}
+        PARC_CORES_R={PARC_CORES}
+        FAIXAS_AGING_R={FAIXAS_AGING}
+      />}
+
       {abaGlobal==="relatorios"&&<AbaRelatorios
         rawRows={rawRows}
         weeklyMerged={WEEKLY_MERGED}
