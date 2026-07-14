@@ -514,13 +514,45 @@ const AbaRelatorios = ({rawRows,weeklyMerged,pdMerged,monthlyData,parceirosDisp,
     const ativos = faixaSel.map(Number);
     const filtrado = base.filter(r=>ativos.some(f=>r.diasAtraso>=f));
     if(fmt2==="csv"){
-      dlCSV([["Pedido","Parceiro","Cidade","UF","Semana","Dias Úteis","Classificação","Data Solicitação","Data Coleta","Problema"],
+      const FAIXAS_CSV = [{min:5,max:9,l:"≥ 5d"},{min:10,max:14,l:"≥ 10d"},{min:15,max:19,l:"≥ 15d"},{min:20,max:24,l:"≥ 20d"},{min:25,max:999,l:"≥ 25d"}];
+      const parcUnicosCSV = [...new Set(filtrado.map(r=>r["Transportadora"]).filter(Boolean))].sort();
+      dlCSV([
+        // Aba 1: resumo por parceiro × faixa
+        ["=== RESUMO POR PARCEIRO ==="],
+        ["Parceiro","Total",...FAIXAS_CSV.map(f=>f.l)],
+        ...parcUnicosCSV.map(p=>{const rp=filtrado.filter(r=>r["Transportadora"]===p);return[p,rp.length,...FAIXAS_CSV.map(f=>rp.filter(r=>r.diasAtraso>=f.min&&r.diasAtraso<=f.max).length)];}),
+        [],
+        ["=== DETALHE DOS PEDIDOS ==="],
+        ["Pedido","Parceiro","Cidade","UF","Semana","Dias Úteis","Classificação","Data Solicitação","Data Coleta","Problema"],
         ...filtrado.map(r=>[r["Pv"]||"",r["Transportadora"]||"",r["Cidade"]||"",r["Estado"]||"",`S${r["semana_Efetivada"]}`,r.diasAtraso,faixaLbl(r.diasAtraso),r["Data Solicitacao Date"]||"",r["Data Coleta Efetivada Date"]||"",r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1?"Sim":"Não"])
       ],"relatorio_atrasos");
     } else {
-      openPrint(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Atrasos</title><style>${CSS_BASE}</style></head><body>
+      // Resumo por faixa
+      const FAIXAS_DEF = [{min:5,max:9,l:"≥ 5d",cls:"f5"},{min:10,max:14,l:"≥ 10d",cls:"f10"},{min:15,max:19,l:"≥ 15d",cls:"f15"},{min:20,max:24,l:"≥ 20d",cls:"f20"},{min:25,max:999,l:"≥ 25d",cls:"f25"}];
+      const resumoFaixas = FAIXAS_DEF.map(f=>({...f, n:filtrado.filter(r=>r.diasAtraso>=f.min&&r.diasAtraso<=f.max).length})).filter(f=>f.n>0);
+      // Resumo por parceiro × faixa
+      const parcUnicos = [...new Set(filtrado.map(r=>r["Transportadora"]).filter(Boolean))].sort();
+      openPrint(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Atrasos</title><style>${CSS_BASE}
+        .resumo{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+        .kpi{border:1px solid #E5E3DF;border-radius:8px;padding:10px 16px;text-align:center}
+        .kpi-label{font-size:10px;color:#6B7280;text-transform:uppercase;margin-bottom:4px}
+        .kpi-val{font-size:24px;font-weight:800}
+        h3{font-size:14px;font-weight:700;color:#6B7280;text-transform:uppercase;letter-spacing:.5px;margin:20px 0 8px;border-bottom:1px solid #E5E3DF;padding-bottom:5px}
+      </style></head><body>
         <h1>⏰ Relatório de Atrasos — Parça</h1>
         <h2>Parceiros: ${parcSel.join(", ")} · Semanas: S${semSel.join(", S")} · ${new Date().toLocaleDateString("pt-BR")}</h2>
+        <h3>Resumo por Faixa de Aging</h3>
+        <div class="resumo">
+          <div class="kpi"><div class="kpi-label">Total atrasos</div><div class="kpi-val" style="color:#F97316">${filtrado.length}</div></div>
+          ${resumoFaixas.map(f=>`<div class="kpi"><div class="kpi-label">${f.l}</div><div class="kpi-val"><span class="chip ${f.cls}">${f.n}</span></div></div>`).join("")}
+        </div>
+        <h3>Resumo por Parceiro</h3>
+        <table><thead><tr><th>Parceiro</th><th>Total</th>${FAIXAS_DEF.map(f=>`<th>${f.l}</th>`).join("")}</tr></thead>
+        <tbody>${parcUnicos.map((p,i)=>{
+          const rp=filtrado.filter(r=>r["Transportadora"]===p);
+          return `<tr style="${i%2===1?'background:#F8F7F4':''}"><td style="font-weight:600">${p}</td><td style="text-align:center;font-weight:700;color:#DC2626">${rp.length}</td>${FAIXAS_DEF.map(f=>{const n=rp.filter(r=>r.diasAtraso>=f.min&&r.diasAtraso<=f.max).length;return`<td style="text-align:center">${n>0?`<span class="chip ${f.cls}">${n}</span>`:"—"}</td>`;}).join("")}</tr>`;
+        }).join("")}</tbody></table>
+        <h3>Detalhe dos Pedidos</h3>
         <table><thead><tr><th>Pedido</th><th>Parceiro</th><th>Cidade</th><th>UF</th><th>Semana</th><th>Dias úteis</th><th>Classificação</th><th>Solicitação</th><th>Coleta</th><th>Prob.</th></tr></thead>
         <tbody>${filtrado.map(r=>`<tr><td style="font-family:monospace;font-size:11px">${r["Pv"]||""}</td><td>${(r["Transportadora"]||"").split(" ")[0]}</td><td>${r["Cidade"]||""}</td><td>${r["Estado"]||""}</td><td>S${r["semana_Efetivada"]}</td><td style="font-weight:800">${r.diasAtraso}d</td><td><span class="chip ${faixaCls(r.diasAtraso)}">${faixaLbl(r.diasAtraso)}</span></td><td>${r["Data Solicitacao Date"]||""}</td><td>${r["Data Coleta Efetivada Date"]||""}</td><td>${r["Problema_de_coleta"]==="1"||r["Problema_de_coleta"]===1?'<span class="prob">⚠️ Sim</span>':"—"}</td></tr>`).join("")}</tbody>
         </table><script>window.print();window.close();</script></body></html>`);
@@ -556,12 +588,15 @@ const AbaRelatorios = ({rawRows,weeklyMerged,pdMerged,monthlyData,parceirosDisp,
     const inds = INDICADORES_R.filter(i=>colsSel.includes(i.key));
     openPrint(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Parceiro</title><style>
       ${CSS_BASE}
-      .capa{padding:36px;background:#F97316;color:white;margin-bottom:0}
-      .capa h1{font-size:26px;margin:0 0 6px}.capa h2{font-size:13px;font-weight:400;opacity:.85;margin:0}
-      .parc-sec{padding:28px 32px;border-bottom:3px solid #FED7AA;page-break-before:always}
-      .ptitle{font-size:22px;font-weight:800;color:#F97316;margin-bottom:16px}
+      .parc-sec{padding:20px 28px;border-bottom:3px solid #FED7AA}
+      .parc-sec:not(:first-child){page-break-before:always}
+      .ptitle{font-size:20px;font-weight:800;color:#F97316;margin-bottom:4px}
+      .psubtitle{font-size:11px;color:#6B7280;margin-bottom:16px}
+      .header-bar{background:#F97316;color:white;padding:12px 28px;margin-bottom:0;display:flex;justify-content:space-between;align-items:center}
+      .header-bar h1{font-size:18px;margin:0;font-weight:800}
+      .header-bar span{font-size:12px;opacity:.85}
     </style></head><body>
-      <div class="capa"><h1>📊 Relatório de Desempenho — Parça</h1><h2>${new Date().toLocaleDateString("pt-BR")} · S${semSel.join(", S")}</h2></div>
+      <div class="header-bar"><h1>📊 Relatório de Desempenho — Parça</h1><span>${new Date().toLocaleDateString("pt-BR")} · S${semSel.join(", S")}</span></div>
       ${parcSel.map(p=>{
         const rowsSem = semSel.map(s=>{const d=pdMerged[p]?.[s];return d?{s,...d}:null;}).filter(Boolean);
         const rowsMes = mesSel.map(m=>{
