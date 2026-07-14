@@ -751,7 +751,7 @@ const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
     const crossMap = {};
     novos.forEach(r=>{
       const sol=parseInt(r["semana_solicitação"]),efe=parseInt(r["semana_Efetivada"]);
-      if(isNaN(sol)||isNaN(efe)) return;
+      if(isNaN(sol)||isNaN(efe)||sol===efe) return; // ignorar mesma semana
       const key=`S${sol}→S${efe}`;
       if(!crossMap[key]) crossMap[key]={sol,efe,rows:[]};
       crossMap[key].rows.push(r);
@@ -762,10 +762,30 @@ const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
   },[csv1Rows,csv2Rows]);
 
   const pill2=(on,cor=C.laranja)=>({padding:"4px 12px",borderRadius:999,border:`1.5px solid ${on?cor:C.cinzaBorda}`,background:on?`${cor}18`:"transparent",cursor:"pointer",fontSize:12,fontWeight:600,color:on?cor:C.cinzaTexto});
+  const sm2=(on,cor=C.laranja)=>({...pill2(on,cor),padding:"3px 8px",fontSize:11});
   const escCSV=v=>{const s=String(v??"");return s.includes(";")||s.includes('"')?`"${s.replace(/"/g,'""')}"`:s;};
   const dlCSV=(rows2,nome)=>{const csv=rows2.map(r=>r.map(escCSV).join(";")).join("\n");const a=document.createElement("a");a.href=URL.createObjectURL(new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"}));a.download=`${nome}_${new Date().toISOString().slice(0,10)}.csv`;a.click();};
   const faixaCor=d=>d>=25?"#7F1D1D":d>=20?C.vermelho:d>=15?C.roxo:d>=10?C.laranja:d>=5?C.amarelo:C.verde;
   const faixaBg =d=>d>=25?"#FEE2E2":d>=20?C.vermelhoLight:d>=15?C.roxoLight:d>=10?"#FFF7ED":d>=5?C.amareloLight:C.verdeLight;
+
+  // Filtro de parceiro para a tabela de cross semanas
+  const [crossParcSel, setCrossParcSel] = useState([]);
+  const parcsNovos = useMemo(()=>diff?[...new Set(diff.novos.map(r=>r["Transportadora"]).filter(Boolean))].sort():[],[diff]);
+  useEffect(()=>{ if(parcsNovos.length>0) setCrossParcSel(parcsNovos); },[parcsNovos.join(",")]);
+
+  const crossMapFiltrado = useMemo(()=>{
+    if(!diff) return {};
+    const novFilt = crossParcSel.length===0 ? diff.novos : diff.novos.filter(r=>crossParcSel.includes(r["Transportadora"]));
+    const map = {};
+    novFilt.forEach(r=>{
+      const sol=parseInt(r["semana_solicitação"]),efe=parseInt(r["semana_Efetivada"]);
+      if(isNaN(sol)||isNaN(efe)||sol===efe) return; // ignorar mesma semana
+      const key=`S${sol}→S${efe}`;
+      if(!map[key]) map[key]={sol,efe,rows:[]};
+      map[key].rows.push(r);
+    });
+    return map;
+  },[diff, crossParcSel]);
 
   return <div style={{display:"flex",flexDirection:"column",gap:14}}>
     {/* Upload */}
@@ -812,13 +832,26 @@ const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
 
       {/* Cross semana */}
       <div style={{background:C.cinzaCard,border:`1px solid ${C.cinzaBorda}`,borderRadius:12,overflow:"hidden"}}>
-        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`,fontWeight:700,fontSize:13}}>
-          🔄 De qual semana vieram os novos coletados?
-          <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:400,marginLeft:8}}>Semana de solicitação → semana de efetivação</span>
+        <div style={{padding:"12px 18px",borderBottom:`1px solid ${C.cinzaBorda}`}}>
+          <div style={{fontWeight:700,fontSize:13,marginBottom:10}}>
+            🔄 De qual semana vieram os novos coletados?
+            <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:400,marginLeft:8}}>Semana de solicitação → semana de efetivação</span>
+          </div>
+          {/* Filtro parceiro */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3}}>Filtrar por parceiro</div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setCrossParcSel(parcsNovos)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todos</button>
+              <button onClick={()=>setCrossParcSel([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhum</button>
+            </div>
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {parcsNovos.map((p,i)=><button key={p} onClick={()=>setCrossParcSel(prev=>prev.includes(p)?prev.filter(x=>x!==p):[...prev,p])} style={sm2(crossParcSel.includes(p),PARC_CORES_R[i%PARC_CORES_R.length])}>{p.split(" ")[0]}</button>)}
+          </div>
         </div>
         <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
           <thead><tr style={{background:C.cinzaFundo}}>{["Solicitado em","Efetivado em","Coletas","Fora do SLA","SLA %"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:h==="Coletas"||h.includes("SLA")||h.includes("Fora")?"center":"left",fontSize:10,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
-          <tbody>{Object.values(diff.crossMap).sort((a,b)=>a.sol!==b.sol?a.sol-b.sol:a.efe-b.efe).map(({sol,efe,rows},i)=>{
+          <tbody>{Object.values(crossMapFiltrado).sort((a,b)=>a.sol!==b.sol?a.sol-b.sol:a.efe-b.efe).map(({sol,efe,rows},i)=>{
             const venc=rows.filter(r=>norm_r(r["Vencido"])==="Sim").length;
             const sla=Math.round((1-venc/rows.length)*100);
             const cor=sla>=86?C.verde:sla>=80?C.amarelo:C.vermelho;
