@@ -793,7 +793,7 @@ const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
       map[key].rows.push(r);
     });
     return map;
-  },[diff, crossParcSel]);
+  },[diff, crossParcSel, crossSemSel]);
 
   return <div style={{display:"flex",flexDirection:"column",gap:14}}>
     {/* Upload */}
