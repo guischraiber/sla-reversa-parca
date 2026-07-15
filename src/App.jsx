@@ -768,6 +768,11 @@ const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
   const faixaCor=d=>d>=25?"#7F1D1D":d>=20?C.vermelho:d>=15?C.roxo:d>=10?C.laranja:d>=5?C.amarelo:C.verde;
   const faixaBg =d=>d>=25?"#FEE2E2":d>=20?C.vermelhoLight:d>=15?C.roxoLight:d>=10?"#FFF7ED":d>=5?C.amareloLight:C.verdeLight;
 
+  // Filtro de semana de efetivação
+  const [crossSemSel, setCrossSemSel] = useState([]);
+  const semsEfet = useMemo(()=>diff?[...new Set(diff.novos.map(r=>parseInt(r["semana_Efetivada"])).filter(n=>!isNaN(n)))].sort((a,b)=>a-b):[],[diff]);
+  useEffect(()=>{ if(semsEfet.length>0) setCrossSemSel(semsEfet); },[semsEfet.join(",")]);
+
   // Filtro de parceiro para a tabela de cross semanas
   const [crossParcSel, setCrossParcSel] = useState([]);
   const parcsNovos = useMemo(()=>diff?[...new Set(diff.novos.map(r=>r["Transportadora"]).filter(Boolean))].sort():[],[diff]);
@@ -775,7 +780,10 @@ const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
 
   const crossMapFiltrado = useMemo(()=>{
     if(!diff) return {};
-    const novFilt = crossParcSel.length===0 ? diff.novos : diff.novos.filter(r=>crossParcSel.includes(r["Transportadora"]));
+    const novFilt = diff.novos.filter(r=>
+      (crossParcSel.length===0||crossParcSel.includes(r["Transportadora"])) &&
+      (crossSemSel.length===0||crossSemSel.includes(parseInt(r["semana_Efetivada"])))
+    );
     const map = {};
     novFilt.forEach(r=>{
       const sol=parseInt(r["semana_solicitação"]),efe=parseInt(r["semana_Efetivada"]);
@@ -836,6 +844,19 @@ const AbaCompararCSVs = ({parseCSVFn, busdays_r, norm_r, PARC_CORES_R}) => {
           <div style={{fontWeight:700,fontSize:13,marginBottom:10}}>
             🔄 De qual semana vieram os novos coletados?
             <span style={{fontSize:11,color:C.cinzaTexto,fontWeight:400,marginLeft:8}}>Semana de solicitação → semana de efetivação</span>
+          </div>
+          {/* Filtro semana efetivação */}
+          <div style={{marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.cinzaTexto,textTransform:"uppercase",letterSpacing:0.3}}>Semana de efetivação</div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setCrossSemSel(semsEfet)} style={{fontSize:11,color:C.azul,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Todas</button>
+                <button onClick={()=>setCrossSemSel([])} style={{fontSize:11,color:C.cinzaTexto,cursor:"pointer",background:"none",border:"none",fontWeight:600}}>Nenhuma</button>
+              </div>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {semsEfet.map(s=><button key={s} onClick={()=>setCrossSemSel(prev=>prev.includes(s)?prev.filter(x=>x!==s):[...prev,s])} style={sm2(crossSemSel.includes(s))}>S{s}</button>)}
+            </div>
           </div>
           {/* Filtro parceiro */}
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
